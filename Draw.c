@@ -5381,7 +5381,7 @@ void hidesafe(int bnbr)
         }
         blithide(LIFO[i], 0);
     }
-    if (found!=INT_MAX)
+    if (found==INT_MAX)
     {
         for (i = zeroLIFOpointer - 1; i >= 0; i--)
         {
@@ -5446,7 +5446,7 @@ void showsafe(int bnbr, int x, int y)
         }
         blithide(LIFO[i], 0);
     }
-    if (found!=INT_MAX)
+    if (found==INT_MAX)
     {
         for (i = zeroLIFOpointer - 1; i >= 0; i--)
         {
