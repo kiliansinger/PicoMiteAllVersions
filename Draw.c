@@ -6769,6 +6769,8 @@ void fun_sprite(void)
         t = 12;
     else if (checkstring(argv[0], (unsigned char *)"S"))
         t = 13;
+    else if (checkstring(argv[0], (unsigned char *)"B"))
+        t = 14;
     else
         SyntaxError();
     if (t < 12)
@@ -6938,6 +6940,27 @@ void fun_sprite(void)
     }
     else if (t == 13)
         iret = sprite_which_collided;
+    else if (t == 14){
+        
+        if (argc < 3)
+            SyntaxError();
+        if (*argv[2] == '#')
+            argv[2]++;
+        bnbr = (int)getint(argv[2], 1, MAXBLITBUF);
+        if (spritebuff[bnbr].active){
+            x = spritebuff[bnbr].x;
+            y = spritebuff[bnbr].y;
+            h  = spritebuff[bnbr].h;
+            w = spritebuff[bnbr].w;
+            iret=(long long)0;
+            for(char *c=spritebuff[bnbr].spritebuffptr,*d=spritebuff[bnbr].blitstoreptr;c< spritebuff[bnbr].spritebuffptr+((w * h + 1) >> 1);++c,++d){
+                if(*c!=0 && *d!=0) {
+                    iret=(long long)1;
+                    break;
+                }
+            }
+        }
+    }
     else
     {
     }
