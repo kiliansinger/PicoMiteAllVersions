@@ -6957,7 +6957,7 @@ void fun_sprite(void)
                 iret=0;
                 spritebuff[bnbr].backgroundcollision[0]=SHRT_MAX;//left
                 spritebuff[bnbr].backgroundcollision[1]=-1;//right
-                spritebuff[bnbr].backgroundcollision[2]=SHRT_MAX;//b
+                spritebuff[bnbr].backgroundcollision[2]=SHRT_MAX;//top
                 spritebuff[bnbr].backgroundcollision[3]=-1;//bottom
                 
                 for(char *c=spritebuff[bnbr].spritebuffptr,*d=spritebuff[bnbr].blitstoreptr;c< spritebuff[bnbr].spritebuffptr+((w * h + 1) >> 1);++c,++d){
@@ -6988,6 +6988,22 @@ void fun_sprite(void)
                         }
                     }
                 }
+                if(spritebuff[bnbr].backgroundcollision[0]==SHRT_MAX)//left
+                    spritebuff[bnbr].backgroundcollision[0]=0;
+                else
+                    spritebuff[bnbr].backgroundcollision[0]++;
+                if(spritebuff[bnbr].backgroundcollision[1]==-1)//right
+                    spritebuff[bnbr].backgroundcollision[1]=0;
+                else
+                    spritebuff[bnbr].backgroundcollision[1]=w-spritebuff[bnbr].backgroundcollision[1];
+                if(spritebuff[bnbr].backgroundcollision[2]==SHRT_MAX)//top
+                    spritebuff[bnbr].backgroundcollision[2]=0;
+                else
+                    spritebuff[bnbr].backgroundcollision[2]++;
+                if(spritebuff[bnbr].backgroundcollision[3]==-1)//bottom
+                    spritebuff[bnbr].backgroundcollision[3]=0;
+                else
+                    spritebuff[bnbr].backgroundcollision[3]=h-spritebuff[bnbr].backgroundcollision[3];
             }
             else iret=0;
         }
