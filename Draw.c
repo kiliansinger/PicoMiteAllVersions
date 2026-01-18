@@ -6963,13 +6963,15 @@ void fun_sprite(void)
                 for(char *c=spritebuff[bnbr].spritebuffptr,*d=spritebuff[bnbr].blitstoreptr;c< spritebuff[bnbr].spritebuffptr+((w * h + 1) >> 1);++c,++d){
                     if(*c!=0 && *d!=0) {
                         for(int nib=0;nib<=1;++nib){//nib=0 needs mask 0xf0 and nib=1 needs 0x0f
+                            int px=(((c - spritebuff[bnbr].spritebuffptr)*2) % w)+nib;
+                            int py=((c - spritebuff[bnbr].spritebuffptr)*2+ nib)/w;
+                            if(px+nib>=w) continue;
                             if(nib){
                                 if((*c & 0xf0)==0 || (*d & 0xf0)==0 ) continue;
                             }else{
                                 if((*c & 0x0f)==0 || (*d & 0x0f)==0 ) continue;
                             }
-                            int px=(((c - spritebuff[bnbr].spritebuffptr)*2) % w)+nib;
-                            int py=((c - spritebuff[bnbr].spritebuffptr)*2)/w;
+                         
                             if(px< spritebuff[bnbr].backgroundcollision[0]){
                                 spritebuff[bnbr].backgroundcollision[0]=px;
                             }
