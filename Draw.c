@@ -6976,10 +6976,10 @@ void fun_sprite(void)
                             if(px<spritebuff[bnbr].backgroundcollision[1]){
                                 spritebuff[bnbr].backgroundcollision[1]=px;
                             }
-                            if(py< spritebuff[bnbr].backgroundcollision[2]){
+                            if(py> spritebuff[bnbr].backgroundcollision[2]){
                                 spritebuff[bnbr].backgroundcollision[2]=py;
                             }   
-                            if(py> spritebuff[bnbr].backgroundcollision[3]){
+                            if(py<spritebuff[bnbr].backgroundcollision[3]){
                                 spritebuff[bnbr].backgroundcollision[3]=py;
                             }
                             iret=1;
