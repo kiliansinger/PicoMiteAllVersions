@@ -6955,10 +6955,10 @@ void fun_sprite(void)
                 h  = spritebuff[bnbr].h;
                 w = spritebuff[bnbr].w;
                 iret=0;
-                spritebuff[bnbr].backgroundcollision[0]=-1;//left
-                spritebuff[bnbr].backgroundcollision[1]=SHRT_MAX;//right
-                spritebuff[bnbr].backgroundcollision[2]=-1;//top
-                spritebuff[bnbr].backgroundcollision[3]=SHRT_MAX;//bottom
+                spritebuff[bnbr].backgroundcollision[0]=SHRT_MAX;//left
+                spritebuff[bnbr].backgroundcollision[1]=-1;//right
+                spritebuff[bnbr].backgroundcollision[2]=SHRT_MAX;//b
+                spritebuff[bnbr].backgroundcollision[3]=-1;//bottom
                 
                 for(char *c=spritebuff[bnbr].spritebuffptr,*d=spritebuff[bnbr].blitstoreptr;c< spritebuff[bnbr].spritebuffptr+((w * h + 1) >> 1);++c,++d){
                     if(*c!=0 && *d!=0) {
@@ -6970,16 +6970,16 @@ void fun_sprite(void)
                             }
                             int px=(((c - spritebuff[bnbr].spritebuffptr)*2) % w)+nib;
                             int py=((c - spritebuff[bnbr].spritebuffptr)*2)/w;
-                            if(px> spritebuff[bnbr].backgroundcollision[0]){
+                            if(px< spritebuff[bnbr].backgroundcollision[0]){
                                 spritebuff[bnbr].backgroundcollision[0]=px;
                             }
-                            if(px<spritebuff[bnbr].backgroundcollision[1]){
+                            if(px>spritebuff[bnbr].backgroundcollision[1]){
                                 spritebuff[bnbr].backgroundcollision[1]=px;
                             }
-                            if(py> spritebuff[bnbr].backgroundcollision[2]){
+                            if(py< spritebuff[bnbr].backgroundcollision[2]){
                                 spritebuff[bnbr].backgroundcollision[2]=py;
                             }   
-                            if(py<spritebuff[bnbr].backgroundcollision[3]){
+                            if(py>spritebuff[bnbr].backgroundcollision[3]){
                                 spritebuff[bnbr].backgroundcollision[3]=py;
                             }
                             iret=1;
