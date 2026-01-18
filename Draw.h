@@ -256,6 +256,7 @@ struct spritebuffer
     char rotation;                      // Rotation state
     char active;                        // Active flag
     char edges;                         // Edge collision flags
+    short backgroundcollision[4];      // left background collision in sprite coordinates
 };
 
 /* ============================================================================

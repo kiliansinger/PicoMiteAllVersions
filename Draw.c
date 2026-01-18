@@ -6947,19 +6947,54 @@ void fun_sprite(void)
         if (*argv[2] == '#')
             argv[2]++;
         bnbr = (int)getint(argv[2], 1, MAXBLITBUF);
-        if (spritebuff[bnbr].active){
-            x = spritebuff[bnbr].x;
-            y = spritebuff[bnbr].y;
-            h  = spritebuff[bnbr].h;
-            w = spritebuff[bnbr].w;
-            iret=(long long)0;
-            for(char *c=spritebuff[bnbr].spritebuffptr,*d=spritebuff[bnbr].blitstoreptr;c< spritebuff[bnbr].spritebuffptr+((w * h + 1) >> 1);++c,++d){
-                if(*c!=0 && *d!=0) {
-                    iret=(long long)1;
-                    break;
+        if (argc==3){
+            if (spritebuff[bnbr].active){
+
+                x = spritebuff[bnbr].x;
+                y = spritebuff[bnbr].y;
+                h  = spritebuff[bnbr].h;
+                w = spritebuff[bnbr].w;
+                iret=0;
+                spritebuff[bnbr].backgroundcollision[0]=-1;//left
+                spritebuff[bnbr].backgroundcollision[1]=SHRT_MAX;//right
+                spritebuff[bnbr].backgroundcollision[2]=-1;//top
+                spritebuff[bnbr].backgroundcollision[3]=SHRT_MAX;//bottom
+                
+                for(char *c=spritebuff[bnbr].spritebuffptr,*d=spritebuff[bnbr].blitstoreptr;c< spritebuff[bnbr].spritebuffptr+((w * h + 1) >> 1);++c,++d){
+                    if(*c!=0 && *d!=0) {
+                        for(int nib=0;nib<=1;++nib){//nib=0 needs mask 0xf0 and nib=1 needs 0x0f
+                            if(nib){
+                                if((*c & 0xf0)==0 || (*d & 0xf0)==0 ) continue;
+                            }else{
+                                if((*c & 0x0f)==0 || (*d & 0x0f)==0 ) continue;
+                            }
+                            int px=(((c - spritebuff[bnbr].spritebuffptr)*2) % w)+nib;
+                            int py=((c - spritebuff[bnbr].spritebuffptr)*2)/w;
+                            if(px> spritebuff[bnbr].backgroundcollision[0]){
+                                spritebuff[bnbr].backgroundcollision[0]=px;
+                            }
+                            if(px<spritebuff[bnbr].backgroundcollision[1]){
+                                spritebuff[bnbr].backgroundcollision[1]=px;
+                            }
+                            if(py< spritebuff[bnbr].backgroundcollision[2]){
+                                spritebuff[bnbr].backgroundcollision[2]=py;
+                            }   
+                            if(py> spritebuff[bnbr].backgroundcollision[3]){
+                                spritebuff[bnbr].backgroundcollision[3]=py;
+                            }
+                            iret=1;
+                        }
+                    }
                 }
             }
+            else iret=0;
         }
+        else if (argc==4){
+            int side;
+            side=(int)getint(argv[3], 1, 4);
+            iret= spritebuff[bnbr].backgroundcollision[side];
+        }
+        else  SyntaxError();
     }
     else
     {
