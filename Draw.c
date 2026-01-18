@@ -6942,7 +6942,7 @@ void fun_sprite(void)
         iret = sprite_which_collided;
     else if (t == 14){
         
-        if (argc < 3)
+        if (argc < 4)
             SyntaxError();
         if (*argv[2] == '#')
             argv[2]++;
@@ -6991,8 +6991,8 @@ void fun_sprite(void)
         }
         else if (argc==4){
             int side;
-            side=(int)getint(argv[3], 1, 4);
-            iret= spritebuff[bnbr].backgroundcollision[side];
+            side=(int)getint(argv[3], 0, 3);
+            iret=spritebuff[bnbr].backgroundcollision[side];
         }
         else  SyntaxError();
     }
