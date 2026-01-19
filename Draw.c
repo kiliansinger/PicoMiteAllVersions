@@ -4964,6 +4964,42 @@ void zeroLIFOswap(int n, int m)
             zeroLIFO[i] = m;
     }
 }
+void getspritebounds(int bnbr)
+{
+    int w = spritebuff[bnbr].w;
+    int h = spritebuff[bnbr].h;
+    int wmul=spritebuff[bnbr].w>1;
+    int sprite_transparent2=sprite_transparent<<4;
+    char *c = (char *)spritebuff[bnbr].spritebuffptr;
+    spritebuff[bnbr].boundsleft= (short *)GetMemory(h*sizeof(short));
+    spritebuff[bnbr].boundsright= (short *)GetMemory(h*sizeof(short));
+    spritebuff[bnbr].boundstop= (short *)GetMemory(h*sizeof(short));
+    spritebuff[bnbr].boundsbottom= (short *)GetMemory(h*sizeof(short));
+    for (int x = 0; x < w; ++x){
+        spritebuff[bnbr].boundstop[x]=SHRT_MAX;
+        spritebuff[bnbr].boundsbottom[x]=-1;
+    }
+    for (int y = 0; y <  h; ++y){
+        int x;
+        spritebuff[bnbr].boundsleft[y] = w;
+        spritebuff[bnbr].boundsright[y] = -1;
+        for (x = 0; x < w; ++x){
+            char val;
+            if(x&1){//odd x upper nipple
+                if((*c++ & 0xf0) == sprite_transparent2) continue;
+            }else{//even x lower nipple
+                if((*c & 0x0f) == sprite_transparent) continue;
+            }
+            if(spritebuff[bnbr].boundsleft[y] == -1)
+              spritebuff[bnbr].boundsleft[y] = x;
+            spritebuff[bnbr].boundsright[y] = x;
+            spritebuff[bnbr].boundsbottom[x] = y;
+            if(spritebuff[bnbr].boundstop[x] == SHRT_MAX )
+              spritebuff[bnbr].boundstop[x] = y;
+        }
+        if( (x&1) == 1 ) ++c;//last x was even for loops ends with xend+1
+    }    
+}
 void MIPS16 closeallsprites(void)
 {
     int i;
@@ -4975,11 +5011,11 @@ void MIPS16 closeallsprites(void)
         {
             if (spritebuff[i].mymaster == -1)
             {
-                if (spritebuff[i].spritebuffptr != NULL)
-                {
-                    FreeMemory((unsigned char *)spritebuff[i].spritebuffptr);
-                    spritebuff[i].spritebuffptr = NULL;
-                }
+                FreeMemory((unsigned char *)spritebuff[i].spritebuffptr);
+                FreeMemory((unsigned char *)spritebuff[i].boundsleft);
+                FreeMemory((unsigned char *)spritebuff[i].boundsright);
+                FreeMemory((unsigned char *)spritebuff[i].boundstop);
+                FreeMemory((unsigned char *)spritebuff[i].boundsbottom);
             }
             if (spritebuff[i].blitstoreptr != NULL)
             {
@@ -5000,6 +5036,10 @@ void MIPS16 closeallsprites(void)
         spritebuff[i].layer = -1;
         spritebuff[i].active = false;
         spritebuff[i].edges = 0;
+        spritebuff[i].boundsleft = NULL;
+        spritebuff[i].boundsright = NULL;
+        spritebuff[i].boundstop = NULL;
+        spritebuff[i].boundsbottom = NULL;
     }
     LIFOpointer = 0;
     zeroLIFOpointer = 0;
@@ -5541,6 +5581,11 @@ void MIPS16 loadsprite(unsigned char *p)
                 spritebuff[bnbr].active = false;
                 spritebuff[bnbr].lastcollisions = 0;
                 spritebuff[bnbr].edges = 0;
+                spritebuff[bnbr].boundsleft = NULL;
+                spritebuff[bnbr].boundsright = NULL;
+                spritebuff[bnbr].boundstop = NULL;
+                spritebuff[bnbr].boundsbottom = NULL;
+                
                 q = spritebuff[bnbr].spritebuffptr;
                 lc = height;
             }
@@ -5642,6 +5687,7 @@ void MIPS16 loadsprite(unsigned char *p)
                     toggle = !toggle;
                 }
             }
+            getspritebounds(bnbr);
             bnbr++;
             newsprite = 1;
         }
@@ -5684,6 +5730,11 @@ void MIPS16 loadarray(unsigned char *p)
         spritebuff[bnbr].active = false;
         spritebuff[bnbr].lastcollisions = 0;
         spritebuff[bnbr].edges = 0;
+        spritebuff[bnbr].boundsleft = NULL;
+        spritebuff[bnbr].boundsright = NULL;
+        spritebuff[bnbr].boundstop = NULL;
+        spritebuff[bnbr].boundsbottom = NULL;
+
         q = spritebuff[bnbr].spritebuffptr;
         int c;
         for (i = 0; i < w * h; i++)
@@ -5702,6 +5753,7 @@ void MIPS16 loadarray(unsigned char *p)
             }
             toggle = !toggle;
         }
+        getspritebounds(bnbr);
     }
     else
         error((char *)"Buffer already in use");
@@ -6144,6 +6196,10 @@ void cmd_sprite(void)
         spritebuff[rbnbr].y = spritebuff[bnbr].y;
         spritebuff[rbnbr].layer = spritebuff[bnbr].layer;
         spritebuff[rbnbr].lastcollisions = spritebuff[bnbr].lastcollisions;
+        spritebuff[rbnbr].boundsleft =  spritebuff[bnbr].boundsleft;
+        spritebuff[rbnbr].boundsright = spritebuff[bnbr].boundsright;
+        spritebuff[rbnbr].boundstop = spritebuff[bnbr].boundstop;
+        spritebuff[rbnbr].boundsbottom = spritebuff[bnbr].boundsbottom;
         if (spritebuff[rbnbr].layer == 0)
             zeroLIFOswap(bnbr, rbnbr);
         else
@@ -6201,6 +6257,10 @@ void cmd_sprite(void)
             spritebuff[bnbr].active = false;
             spritebuff[bnbr].lastcollisions = 0;
             spritebuff[bnbr].edges = 0;
+            spritebuff[bnbr].boundsleft = NULL;
+            spritebuff[bnbr].boundsright = NULL;
+            spritebuff[bnbr].boundstop = NULL;
+            spritebuff[bnbr].boundsbottom = NULL;
         }
         else
         {
@@ -6212,6 +6272,7 @@ void cmd_sprite(void)
                 error((char *)"Existing buffer is incorrect size");
         }
         ReadBufferFast(x1, y1, x1 + w - 1, y1 + h - 1, (unsigned char *)spritebuff[bnbr].spritebuffptr);
+        getspritebounds(bnbr);
     }
     else if ((p = checkstring(cmdline, (unsigned char *)"COPY")))
     {
@@ -6256,6 +6317,10 @@ void cmd_sprite(void)
                 spritebuff[bnbr].master |= ((int64_t)1 << (int64_t)cpy);
                 spritebuff[bnbr].lastcollisions = 0;
                 spritebuff[cpy].active = false;
+                spritebuff[cpy].boundsleft = spritebuff[bnbr].boundsleft;
+                spritebuff[cpy].boundsright = spritebuff[bnbr].boundsright;
+                spritebuff[cpy].boundstop = spritebuff[bnbr].boundstop;
+                spritebuff[cpy].boundsbottom = spritebuff[bnbr].boundsbottom;
                 nbr--;
                 cpy++;
             }
@@ -6310,8 +6375,13 @@ void cmd_sprite(void)
                 layer_in_use[spritebuff[bnbr].layer]--;
                 sprites_in_use--;
             }
-            if (spritebuff[bnbr].mymaster == -1)
+            if (spritebuff[bnbr].mymaster == -1){
                 FreeMemorySafe((void **)&spritebuff[bnbr].spritebuffptr);
+                FreeMemory((unsigned char *)spritebuff[bnbr].boundsleft);
+                FreeMemory((unsigned char *)spritebuff[bnbr].boundsright);
+                FreeMemory((unsigned char *)spritebuff[bnbr].boundstop);
+                FreeMemory((unsigned char *)spritebuff[bnbr].boundsbottom);
+            }
             else
                 spritebuff[spritebuff[bnbr].mymaster].master &= ~(1 << bnbr);
             FreeMemorySafe((void **)&spritebuff[bnbr].blitstoreptr);
@@ -6328,6 +6398,10 @@ void cmd_sprite(void)
             spritebuff[bnbr].layer = -1;
             spritebuff[bnbr].active = false;
             spritebuff[bnbr].edges = 0;
+            spritebuff[bnbr].boundsleft = NULL;
+            spritebuff[bnbr].boundsright = NULL;
+            spritebuff[bnbr].boundstop = NULL;
+            spritebuff[bnbr].boundsbottom = NULL;
         }
         else
             error((char *)"Buffer not in use");
@@ -6420,6 +6494,10 @@ void cmd_sprite(void)
         spritebuff[bnbr].active = false;
         spritebuff[bnbr].lastcollisions = 0;
         spritebuff[bnbr].edges = 0;
+        spritebuff[bnbr].boundsleft = NULL;
+        spritebuff[bnbr].boundsright = NULL;
+        spritebuff[bnbr].boundstop = NULL;
+        spritebuff[bnbr].boundsbottom = NULL;                
         unsigned char *t = (unsigned char *)spritebuff[bnbr].spritebuffptr;
         if (w > HRes || h > VRes)
         {
@@ -6485,6 +6563,7 @@ void cmd_sprite(void)
             rr += 4;
         }
         upng_free(upng);
+        getspritebounds(bnbr);
         return;
     }
 #endif
@@ -6551,6 +6630,10 @@ void cmd_sprite(void)
         spritebuff[bnbr].active = false;
         spritebuff[bnbr].lastcollisions = 0;
         spritebuff[bnbr].edges = 0;
+        spritebuff[bnbr].boundsleft = NULL;
+        spritebuff[bnbr].boundsright = NULL;
+        spritebuff[bnbr].boundstop = NULL;
+        spritebuff[bnbr].boundsbottom = NULL;    
         char *t = spritebuff[bnbr].spritebuffptr;
         int i = state.width * state.height;
         unsigned char *q = state.output_buffer;
@@ -6583,6 +6666,7 @@ void cmd_sprite(void)
             toggle = !toggle;
             q += 3;
         }
+        getspritebounds(bnbr);
         return;
     }
     else if ((p = checkstring(cmdline, (unsigned char *)"MOVE")))
@@ -6949,18 +7033,64 @@ void fun_sprite(void)
         bnbr = (int)getint(argv[2], 1, MAXBLITBUF);
         if (argc==3){
             if (spritebuff[bnbr].active){
-
+                int sprite_transparent2=sprite_transparent<<4;
                 x = spritebuff[bnbr].x;
                 y = spritebuff[bnbr].y;
                 h  = spritebuff[bnbr].h;
                 w = spritebuff[bnbr].w;
-                iret=0;
+                iret = 0;
                 spritebuff[bnbr].backgroundcollision[0]=-1;//left
                 spritebuff[bnbr].backgroundcollision[1]=SHRT_MAX;//right
                 spritebuff[bnbr].backgroundcollision[2]=-1;//top
                 spritebuff[bnbr].backgroundcollision[3]=SHRT_MAX;//bottom
-           
-                
+                spritebuff[bnbr].backgroundcollision[4]=-1;//left
+                spritebuff[bnbr].backgroundcollision[5]=SHRT_MAX;//right
+                spritebuff[bnbr].backgroundcollision[6]=-1;//top
+                spritebuff[bnbr].backgroundcollision[7]=SHRT_MAX;//bottom
+                char *c=spritebuff[bnbr].blitstoreptr;
+                if (!c) error((char *)"Buffers are empty");
+                for (int y = 0; y <  h; ++y){
+                    int x;
+                    for (x = 0; x < w; ++x){
+                        if(x&1){//odd x upper nipple
+                            if((*c++ & 0xf0) == sprite_transparent2) continue;
+                        }else{//even x lower nipple
+                            if((*c & 0x0f) == sprite_transparent) continue;
+                        }
+                        if(x> spritebuff[bnbr].backgroundcollision[0]){
+                            spritebuff[bnbr].backgroundcollision[0]=x;
+                        }
+                        if(x<spritebuff[bnbr].backgroundcollision[1]){
+                            spritebuff[bnbr].backgroundcollision[1]=x;
+                        }
+                        if(y> spritebuff[bnbr].backgroundcollision[2]){
+                            spritebuff[bnbr].backgroundcollision[2]=y;
+                        }   
+                        if(y<spritebuff[bnbr].backgroundcollision[3]){
+                            spritebuff[bnbr].backgroundcollision[3]=y;
+                        }
+                        if(iret==0) iret=1;
+                        if(x>=spritebuff[bnbr].boundsleft[y]){
+                            spritebuff[bnbr].backgroundcollision[4]=x-spritebuff[bnbr].boundsleft[y]+1;
+                            iret=2;
+                        }
+                        if( spritebuff[bnbr].backgroundcollision[5]==SHRT_MAX && x<=spritebuff[bnbr].boundsright[y]){
+                            spritebuff[bnbr].backgroundcollision[5]=spritebuff[bnbr].boundsleft[y]-x+1;
+                            iret=2;
+                        }
+                        if(y>=spritebuff[bnbr].boundstop[x]){
+                            spritebuff[bnbr].backgroundcollision[6]=y-spritebuff[bnbr].boundstop[x]+1;
+                            iret=2;
+                        }
+                        if( spritebuff[bnbr].backgroundcollision[7]==SHRT_MAX && y<=spritebuff[bnbr].boundsbottom[x]){
+                            spritebuff[bnbr].backgroundcollision[7]=spritebuff[bnbr].boundsbottom[x]-y+1;
+                            iret=2;
+                        }
+                    }
+                    if( (x&1) == 1 ) ++c;//last x was even for loops ends with xend+1
+                }    
+            
+           /*     
                 for(char *c=spritebuff[bnbr].spritebuffptr,*d=spritebuff[bnbr].blitstoreptr;c< spritebuff[bnbr].spritebuffptr+((w * h + 1) >> 1);++c,++d){
                     if(*c!=0 && *d!=0) {
                         for(int nib=0;nib<=1;++nib){//nib=0 needs mask 0xf0 and nib=1 needs 0x0f
@@ -6989,7 +7119,7 @@ void fun_sprite(void)
                         }
                     }
                 }
-                
+                */
                 if(spritebuff[bnbr].backgroundcollision[0]==-1)//left
                     spritebuff[bnbr].backgroundcollision[0]=0;
                 else
@@ -7006,6 +7136,20 @@ void fun_sprite(void)
                     spritebuff[bnbr].backgroundcollision[3]=0;
                 else
                     spritebuff[bnbr].backgroundcollision[3]=h-spritebuff[bnbr].backgroundcollision[3];
+                
+                if(spritebuff[bnbr].backgroundcollision[4]==-1)//left
+                    spritebuff[bnbr].backgroundcollision[4]=0;
+            
+                if(spritebuff[bnbr].backgroundcollision[5]==SHRT_MAX)//right
+                    spritebuff[bnbr].backgroundcollision[5]=0;
+            
+                if(spritebuff[bnbr].backgroundcollision[6]==-1)//top
+                    spritebuff[bnbr].backgroundcollision[6]=0;
+              
+                if(spritebuff[bnbr].backgroundcollision[7]==SHRT_MAX)//bottom
+                    spritebuff[bnbr].backgroundcollision[7]=0;
+              
+        
             }
             else iret=0;
         }
