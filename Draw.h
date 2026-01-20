@@ -257,10 +257,6 @@ struct spritebuffer
     char active;                        // Active flag
     char edges;                         // Edge collision flags
     short backgroundcollision[8];       // Background collision (rect:l,r,t,b,boundary:l2,r2,t2,b2) 
-    short *boundsleft;
-    short *boundsright;
-    short *boundstop;
-    short *boundsbottom;
 };
 /* ============================================================================
  * Type definitions - Static object for collision detection
