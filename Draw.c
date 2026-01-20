@@ -7077,26 +7077,22 @@ void fun_sprite(void)
                             spritebuff[bnbr].backgroundcollision[3]=y;
                         }
                         if(iret==0) iret=1;
-                        if(x>=spritebuff[bnbr].boundsleft[y]){
+                        if(x>=spritebuff[bnbr].boundsleft[y]&&x<=spritebuff[bnbr].boundsright[y]){
                             if(x-spritebuff[bnbr].boundsleft[y]> spritebuff[bnbr].backgroundcollision[4]){
                                 spritebuff[bnbr].backgroundcollision[4]=x-spritebuff[bnbr].boundsleft[y];
                                 iret=2;
                             }
-                        }
-                        if(x<=spritebuff[bnbr].boundsright[y]){
-                            if(spritebuff[bnbr].boundsright[y]-x >  spritebuff[bnbr].backgroundcollision[5]){
+                             if(spritebuff[bnbr].boundsright[y]-x >  spritebuff[bnbr].backgroundcollision[5]){
                                 spritebuff[bnbr].backgroundcollision[5]=spritebuff[bnbr].boundsright[y]-x;
                                 iret=2;
                             }
                         }
-                        if(y>=spritebuff[bnbr].boundstop[x]){
+                        if(y>=spritebuff[bnbr].boundstop[x] && y<=spritebuff[bnbr].boundsbottom[x]){
                             if(y-spritebuff[bnbr].boundstop[x]> spritebuff[bnbr].backgroundcollision[6]){
                                 spritebuff[bnbr].backgroundcollision[6]=y-spritebuff[bnbr].boundstop[x];
                                 iret=2;
                             }
-                        }
-                        if( y<=spritebuff[bnbr].boundsbottom[x]){
-                            if(spritebuff[bnbr].boundsbottom[x]-y> spritebuff[bnbr].backgroundcollision[7]){    
+                              if(spritebuff[bnbr].boundsbottom[x]-y> spritebuff[bnbr].backgroundcollision[7]){    
                                 spritebuff[bnbr].backgroundcollision[7]=spritebuff[bnbr].boundsbottom[x]-y;
                                 iret=2;
                             }
@@ -7178,8 +7174,34 @@ void fun_sprite(void)
                     spritebuff[bnbr].backgroundcollision[7]=0;
                 else 
                     spritebuff[bnbr].backgroundcollision[7]++;       
+                //cleanup reporting
+                if(spritebuff[bnbr].backgroundcollision[0]==w) spritebuff[bnbr].backgroundcollision[0]=0;
+                if(spritebuff[bnbr].backgroundcollision[1]==w) spritebuff[bnbr].backgroundcollision[1]=0;
+                if(spritebuff[bnbr].backgroundcollision[2]==h) spritebuff[bnbr].backgroundcollision[2]=0;
+                if(spritebuff[bnbr].backgroundcollision[3]==h) spritebuff[bnbr].backgroundcollision[3]=0;
+                if(spritebuff[bnbr].backgroundcollision[4]!=0 && spritebuff[bnbr].backgroundcollision[5]!=0){
+                    if(spritebuff[bnbr].backgroundcollision[4]<spritebuff[bnbr].backgroundcollision[5]){
+                        spritebuff[bnbr].backgroundcollision[5]=0;
+                    }
+                    else if(spritebuff[bnbr].backgroundcollision[4]>spritebuff[bnbr].backgroundcollision[5]){
+                        spritebuff[bnbr].backgroundcollision[4]=0;
+                    }else{//both sides meaning that we have top bottom hit
+                        spritebuff[bnbr].backgroundcollision[4]=0;
+                        spritebuff[bnbr].backgroundcollision[5]=0;
+                    }
+                }
+                if(spritebuff[bnbr].backgroundcollision[6]!=0 && spritebuff[bnbr].backgroundcollision[7]!=0){
+                    if(spritebuff[bnbr].backgroundcollision[6]<spritebuff[bnbr].backgroundcollision[7]){
+                        spritebuff[bnbr].backgroundcollision[7]=0;
+                    }
+                    else if(spritebuff[bnbr].backgroundcollision[6]>spritebuff[bnbr].backgroundcollision[7]){
+                        spritebuff[bnbr].backgroundcollision[6]=0;
+                    }else{//top bottom meaning that we have left right hit
+                        spritebuff[bnbr].backgroundcollision[6]=0;
+                        spritebuff[bnbr].backgroundcollision[7]=0;
+                    }
+                }
             }
-            else iret=0;
         }
         else if (argc==5){
             int side;
