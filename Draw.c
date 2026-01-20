@@ -7205,7 +7205,7 @@ void fun_sprite(void)
                 short *boundsright;
                 short *boundstop;
                 short *boundsbottom;
-                getspritebounds(boundsleft,boundsright,boundstop,boundsbottom);
+                getspritebounds(bnbr,boundsleft,boundsright,boundstop,boundsbottom);
                 char *c=spritebuff[bnbr].blitstoreptr;
                 if (!c) error((char *)"Buffers are empty");
                 int nib=1;
@@ -7231,7 +7231,7 @@ void fun_sprite(void)
                             spritebuff[bnbr].backgroundcollision[3]=y;
                         }
                         if(iret==0) iret=1;
-                        if(x>=boundsleft[y]&&x<=spritebuff[bnbr].boundsright[y]){
+                        if(x>=boundsleft[y]&&x<=boundsright[y]){
                             if(x-boundsleft[y]> spritebuff[bnbr].backgroundcollision[4]){
                                 spritebuff[bnbr].backgroundcollision[4]=x-boundsleft[y];
                                 iret=2;
