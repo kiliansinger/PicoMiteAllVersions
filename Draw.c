@@ -51,6 +51,20 @@ extern mutex_t frameBufferMutex;
 #define LONG long
 #define max(x, y) (((x) > (y)) ? (x) : (y))
 #define min(x, y) (((x) < (y)) ? (x) : (y))
+
+// Helper macros for strided array access (used for struct member arrays)
+#define STRIDE_FLOAT(ptr, idx, stride) (*(MMFLOAT *)((char *)(ptr) + (idx) * (stride)))
+#define STRIDE_INT(ptr, idx, stride) (*(long long int *)((char *)(ptr) + (idx) * (stride)))
+
+// Maximum number of vertices for polygon fill operations
+#define MAX_POLYGON_VERTICES 256
+
+// Magic number to indicate sprite position is not in use
+#define SPRITE_POS_INACTIVE 10000
+
+// Magic number to indicate buffer is a triangle buffer (not rectangular)
+#define TRIANGLE_BUFFER_MARKER 9999
+
 void DrawFilledCircle(int x, int y, int radius, int r, int fill, int ints_per_line, uint32_t *br, MMFLOAT aspect, MMFLOAT aspect2);
 void SaveTriangle(int bnbr, char *buff);
 void RestoreTriangle(int bnbr, char *buff);
@@ -152,9 +166,17 @@ bool CollisionFound = false;
 int sprite_which_collided = -1;
 static bool hideall = 0;
 uint8_t sprite_transparent = 0;
+
+// Static object collision detection
+struct stobject stobjects[MAXSTOBJECTS + 1] = {0};
+char *STCollisionInterrupt = NULL;
+bool STCollisionFound = false;
+int sprite_hit_st = -1;
+int st_which_collided = -1;
+
 #ifdef PICOMITEVGA
 #ifndef HDMI
-uint8_t remap[256];
+uint32_t remap[256];
 #else
 uint32_t remap555[256];
 uint32_t remap332[256];
@@ -482,11 +504,13 @@ void MIPS16 cmd_guiMX170(void)
  * The following section will be excluded from the documentation.
  */
 
-void getargaddress(unsigned char *p, long long int **ip, MMFLOAT **fp, int *n)
+void getargaddress(unsigned char *p, long long int **ip, MMFLOAT **fp, int *n, int *stride)
 {
     unsigned char *ptr = NULL;
     *fp = NULL;
     *ip = NULL;
+    if (stride)
+        *stride = sizeof(MMFLOAT); // Default stride for normal arrays (8 bytes)
     char pp[STRINGSIZE] = {0};
     strcpy(pp, (char *)p);
     if (!isnamestart(pp[0]))
@@ -533,6 +557,70 @@ void getargaddress(unsigned char *p, long long int **ip, MMFLOAT **fp, int *n)
         else
             *ip = (long long int *)ptr;
     }
+#ifdef STRUCTENABLED
+    // Check if this is a struct member access (g_StructMemberType set by findvar)
+    else if (ptr && (g_vartbl[g_VarIndex].type & T_STRUCT) && g_StructMemberType != 0)
+    {
+        // Caller must handle stride for struct member arrays
+        if (stride == NULL)
+            StandardError(47);
+
+        // Check if this is an array element access (e.g., boxes(i%).x) vs whole array (boxes().x)
+        // We need to check if there's an index expression in the parentheses
+        unsigned char *pcheck = p;
+        skipspace(pcheck);
+        // Skip past variable name
+        while (isnamechar(*pcheck))
+            pcheck++;
+        if (*pcheck == '!' || *pcheck == '%' || *pcheck == '$')
+            pcheck++;
+        skipspace(pcheck);
+        if (*pcheck == '(')
+        {
+            pcheck++;
+            skipspace(pcheck);
+            if (*pcheck != ')')
+            {
+                // There's an index expression - this is a single element access
+                *n = 1;
+                return;
+            }
+        }
+
+        // This is a struct array with member access like points().x
+        int struct_type = (int)g_vartbl[g_VarIndex].size;
+        int struct_size = g_structtbl[struct_type]->total_size;
+
+        // Get member type from g_StructMemberType (set by findvar/ResolveStructMember)
+        int member_type = g_StructMemberType;
+
+        // Check member type is numeric
+        if (!(member_type & (T_NBR | T_INT)))
+        {
+            *n = 1; // Not a numeric member, treat as single value
+            return;
+        }
+
+        // Calculate number of elements from array dimensions
+        if (*n == 0)
+            *n = g_vartbl[g_VarIndex].dims[0] + 1 - g_OptionBase;
+        else
+            *n = (g_vartbl[g_VarIndex].dims[0] + 1 - g_OptionBase) < *n ? (g_vartbl[g_VarIndex].dims[0] + 1 - g_OptionBase) : *n;
+
+        // Check for 2D arrays (not supported)
+        if (g_vartbl[g_VarIndex].dims[1] != 0)
+            StandardError(6);
+
+        // Set stride to structure size
+        *stride = struct_size;
+
+        // Set the appropriate pointer based on member type
+        if (member_type & T_NBR)
+            *fp = (MMFLOAT *)ptr;
+        else
+            *ip = (long long int *)ptr;
+    }
+#endif
     else
     {
         *n = 1; // may be a function call
@@ -591,7 +679,6 @@ void DrawPixelNormal(int x, int y, int c)
 void ClearScreen(int c)
 {
 #if PICOMITERP2350
-#ifndef PICOMITEVGA
     if (ScrollLCD == ScrollLCDMEM332)
     {
         if (Option.DISPLAY_TYPE >= SSD1963_5_12BUFF)
@@ -605,7 +692,6 @@ void ClearScreen(int c)
             ScrollStart = 0;
         }
     }
-#endif
 #endif
 #ifdef PICOMITEVGA
     if (DISPLAY_TYPE == SCREENMODE1 && WriteBuf == DisplayBuf)
@@ -1617,7 +1703,7 @@ void cmd_RestoreTriangle(unsigned char *p)
     int bnbr = getint(argv[0], 1, MAXBLITBUF) - 1; // get the buffer number
     if (blitbuff[bnbr].blitbuffptr == NULL)
         error((char *)"Buffer not in use");
-    if (blitbuff[bnbr].h != 9999)
+    if (blitbuff[bnbr].h != TRIANGLE_BUFFER_MARKER)
         error("Invalid buffer for restore");
     RestoreTriangle(bnbr, blitbuff[bnbr].blitbuffptr);
     FreeMemory((unsigned char *)blitbuff[bnbr].blitbuffptr);
@@ -1643,7 +1729,7 @@ void cmd_ReadTriangle(unsigned char *p)
     y3 = getinteger(argv[12]);
     size = SizeTriangle(x1, y1, x2, y2, x3, y3);
     blitbuff[bnbr].blitbuffptr = GetMemory(size * 3 + 256);
-    blitbuff[bnbr].h = 9999;
+    blitbuff[bnbr].h = TRIANGLE_BUFFER_MARKER;
     short *buff = (short *)blitbuff[bnbr].blitbuffptr;
     *buff++ = x1;
     *buff++ = y1;
@@ -2050,14 +2136,15 @@ void cmd_pixel(void)
     else
     {
         int x1, y1, c = 0, n = 0, i, nc = 0;
+        int x1stride = sizeof(MMFLOAT), y1stride = sizeof(MMFLOAT), cstride = sizeof(MMFLOAT);
         long long int *x1ptr, *y1ptr, *cptr;
         MMFLOAT *x1fptr, *y1fptr, *cfptr;
         getcsargs(&cmdline, 5);
         if (!(argc == 3 || argc == 5))
             StandardError(2);
-        getargaddress(argv[0], &x1ptr, &x1fptr, &n);
+        getargaddress(argv[0], &x1ptr, &x1fptr, &n, &x1stride);
         if (n != 1)
-            getargaddress(argv[2], &y1ptr, &y1fptr, &n);
+            getargaddress(argv[2], &y1ptr, &y1fptr, &n, &y1stride);
         if (n == 1)
         {                    // just a single point
             c = gui_fcolour; // setup the defaults
@@ -2080,7 +2167,7 @@ void cmd_pixel(void)
             c = gui_fcolour; // setup the defaults
             if (argc == 5)
             {
-                getargaddress(argv[4], &cptr, &cfptr, &nc);
+                getargaddress(argv[4], &cptr, &cfptr, &nc, &cstride);
                 if (nc == 1)
                     c = getint(argv[4], 0, WHITE);
                 else if (nc > 1)
@@ -2089,7 +2176,7 @@ void cmd_pixel(void)
                         n = nc; // adjust the dimensionality
                     for (i = 0; i < nc; i++)
                     {
-                        c = (cfptr == NULL ? cptr[i] : (int)cfptr[i]);
+                        c = (cfptr == NULL ? STRIDE_INT(cptr, i, cstride) : (int)STRIDE_FLOAT(cfptr, i, cstride));
                         if (c < 0 || c > WHITE)
                             StandardErrorParam3(26, (int)c, 0, WHITE);
                     }
@@ -2097,10 +2184,10 @@ void cmd_pixel(void)
             }
             for (i = 0; i < n; i++)
             {
-                x1 = (x1fptr == NULL ? x1ptr[i] : (int)x1fptr[i]);
-                y1 = (y1fptr == NULL ? y1ptr[i] : (int)y1fptr[i]);
+                x1 = (x1fptr == NULL ? STRIDE_INT(x1ptr, i, x1stride) : (int)STRIDE_FLOAT(x1fptr, i, x1stride));
+                y1 = (y1fptr == NULL ? STRIDE_INT(y1ptr, i, y1stride) : (int)STRIDE_FLOAT(y1fptr, i, y1stride));
                 if (nc > 1)
-                    c = (cfptr == NULL ? cptr[i] : (int)cfptr[i]);
+                    c = (cfptr == NULL ? STRIDE_INT(cptr, i, cstride) : (int)STRIDE_FLOAT(cfptr, i, cstride));
                 DrawPixel(x1, y1, c);
             }
         }
@@ -2151,17 +2238,19 @@ void cmd_circle(void)
     else
     {
         int x, y, r, w = 0, c = 0, f = 0, n = 0, i, nc = 0, nw = 0, nf = 0, na = 0;
+        int xstride = sizeof(MMFLOAT), ystride = sizeof(MMFLOAT), rstride = sizeof(MMFLOAT);
+        int wstride = sizeof(MMFLOAT), astride = sizeof(MMFLOAT), cstride = sizeof(MMFLOAT), fstride = sizeof(MMFLOAT);
         MMFLOAT a;
         long long int *xptr, *yptr, *rptr, *fptr, *wptr, *cptr, *aptr;
         MMFLOAT *xfptr, *yfptr, *rfptr, *ffptr, *wfptr, *cfptr, *afptr;
         getcsargs(&cmdline, 13);
         if (!(argc & 1) || argc < 5)
             StandardError(2);
-        getargaddress(argv[0], &xptr, &xfptr, &n);
+        getargaddress(argv[0], &xptr, &xfptr, &n, &xstride);
         if (n != 1)
         {
-            getargaddress(argv[2], &yptr, &yfptr, &n);
-            getargaddress(argv[4], &rptr, &rfptr, &n);
+            getargaddress(argv[2], &yptr, &yfptr, &n, &ystride);
+            getargaddress(argv[4], &rptr, &rfptr, &n, &rstride);
         }
         if (n == 1)
         {
@@ -2193,7 +2282,7 @@ void cmd_circle(void)
             a = 1; // setup the defaults
             if (argc > 5 && *argv[6])
             {
-                getargaddress(argv[6], &wptr, &wfptr, &nw);
+                getargaddress(argv[6], &wptr, &wfptr, &nw, &wstride);
                 if (nw == 1)
                     w = getint(argv[6], 0, 100);
                 else if (nw > 1)
@@ -2202,7 +2291,7 @@ void cmd_circle(void)
                         n = nw; // adjust the dimensionality
                     for (i = 0; i < nw; i++)
                     {
-                        w = (wfptr == NULL ? wptr[i] : (int)wfptr[i]);
+                        w = (wfptr == NULL ? STRIDE_INT(wptr, i, wstride) : (int)STRIDE_FLOAT(wfptr, i, wstride));
                         if (w < 0 || w > 100)
                             StandardErrorParam3(26, (int)w, 0, 100);
                     }
@@ -2210,7 +2299,7 @@ void cmd_circle(void)
             }
             if (argc > 7 && *argv[8])
             {
-                getargaddress(argv[8], &aptr, &afptr, &na);
+                getargaddress(argv[8], &aptr, &afptr, &na, &astride);
                 if (na == 1)
                     a = getnumber(argv[8]);
                 if (na > 1 && na < n)
@@ -2218,7 +2307,7 @@ void cmd_circle(void)
             }
             if (argc > 9 && *argv[10])
             {
-                getargaddress(argv[10], &cptr, &cfptr, &nc);
+                getargaddress(argv[10], &cptr, &cfptr, &nc, &cstride);
                 if (nc == 1)
                     c = getint(argv[10], 0, WHITE);
                 else if (nc > 1)
@@ -2227,7 +2316,7 @@ void cmd_circle(void)
                         n = nc; // adjust the dimensionality
                     for (i = 0; i < nc; i++)
                     {
-                        c = (cfptr == NULL ? cptr[i] : (int)cfptr[i]);
+                        c = (cfptr == NULL ? STRIDE_INT(cptr, i, cstride) : (int)STRIDE_FLOAT(cfptr, i, cstride));
                         if (c < 0 || c > WHITE)
                             StandardErrorParam3(26, (int)c, 0, WHITE);
                     }
@@ -2235,7 +2324,7 @@ void cmd_circle(void)
             }
             if (argc > 11)
             {
-                getargaddress(argv[12], &fptr, &ffptr, &nf);
+                getargaddress(argv[12], &fptr, &ffptr, &nf, &fstride);
                 if (nf == 1)
                     f = getint(argv[12], -1, WHITE);
                 else if (nf > 1)
@@ -2244,7 +2333,7 @@ void cmd_circle(void)
                         n = nf; // adjust the dimensionality
                     for (i = 0; i < nf; i++)
                     {
-                        f = (ffptr == NULL ? fptr[i] : (int)ffptr[i]);
+                        f = (ffptr == NULL ? STRIDE_INT(fptr, i, fstride) : (int)STRIDE_FLOAT(ffptr, i, fstride));
                         if (f < 0 || f > WHITE)
                             StandardErrorParam3(26, (int)f, 0, WHITE);
                     }
@@ -2254,17 +2343,17 @@ void cmd_circle(void)
             Option.Refresh = 0;
             for (i = 0; i < n; i++)
             {
-                x = (xfptr == NULL ? xptr[i] : (int)xfptr[i]);
-                y = (yfptr == NULL ? yptr[i] : (int)yfptr[i]);
-                r = (rfptr == NULL ? rptr[i] : (int)rfptr[i]) - 1;
+                x = (xfptr == NULL ? STRIDE_INT(xptr, i, xstride) : (int)STRIDE_FLOAT(xfptr, i, xstride));
+                y = (yfptr == NULL ? STRIDE_INT(yptr, i, ystride) : (int)STRIDE_FLOAT(yfptr, i, ystride));
+                r = (rfptr == NULL ? STRIDE_INT(rptr, i, rstride) : (int)STRIDE_FLOAT(rfptr, i, rstride)) - 1;
                 if (nw > 1)
-                    w = (wfptr == NULL ? wptr[i] : (int)wfptr[i]);
+                    w = (wfptr == NULL ? STRIDE_INT(wptr, i, wstride) : (int)STRIDE_FLOAT(wfptr, i, wstride));
                 if (nc > 1)
-                    c = (cfptr == NULL ? cptr[i] : (int)cfptr[i]);
+                    c = (cfptr == NULL ? STRIDE_INT(cptr, i, cstride) : (int)STRIDE_FLOAT(cfptr, i, cstride));
                 if (nf > 1)
-                    f = (ffptr == NULL ? fptr[i] : (int)ffptr[i]);
+                    f = (ffptr == NULL ? STRIDE_INT(fptr, i, fstride) : (int)STRIDE_FLOAT(ffptr, i, fstride));
                 if (na > 1)
-                    a = (afptr == NULL ? (MMFLOAT)aptr[i] : afptr[i]);
+                    a = (afptr == NULL ? (MMFLOAT)STRIDE_INT(aptr, i, astride) : STRIDE_FLOAT(afptr, i, astride));
                 DrawCircle(x, y, r, w, c, f, a);
             }
             Option.Refresh = save_refresh;
@@ -2498,8 +2587,9 @@ void cmd_line(void)
             MMFLOAT *y1fptr;
             int xs = 0, xinc = 1;
             int ys = 0, yinc = 1;
+            int y1stride = sizeof(MMFLOAT);
             getcsargs(&p, 13);
-            getargaddress(argv[0], &y1ptr, &y1fptr, &n);
+            getargaddress(argv[0], &y1ptr, &y1fptr, &n, &y1stride);
             if (n == 1)
                 error("Argument 1 is not an array");
             nc = n;
@@ -2527,13 +2617,13 @@ void cmd_line(void)
                 if (y + yinc >= nc)
                     break;
                 x1 = xs + i * xinc;
-                y1 = (y1fptr == NULL ? y1ptr[y] : (int)y1fptr[y]);
+                y1 = (y1fptr == NULL ? STRIDE_INT(y1ptr, y, y1stride) : (int)STRIDE_FLOAT(y1fptr, y, y1stride));
                 if (y1 < 0)
                     y1 = 0;
                 if (y1 >= VRes)
                     y1 = VRes - 1;
                 x2 = xs + (i + 1) * xinc;
-                y2 = (y1fptr == NULL ? y1ptr[y + yinc] : (int)y1fptr[y + yinc]);
+                y2 = (y1fptr == NULL ? STRIDE_INT(y1ptr, y + yinc, y1stride) : (int)STRIDE_FLOAT(y1fptr, y + yinc, y1stride));
                 if (x1 >= HRes)
                     break; // can only get worse so stop now
                 if (x2 >= HRes)
@@ -2583,17 +2673,19 @@ void cmd_line(void)
         {
             long long int *x1ptr, *y1ptr, *x2ptr, *y2ptr, *wptr, *cptr;
             MMFLOAT *x1fptr, *y1fptr, *x2fptr, *y2fptr, *wfptr, *cfptr;
+            int x1stride = sizeof(MMFLOAT), y1stride = sizeof(MMFLOAT), x2stride = sizeof(MMFLOAT), y2stride = sizeof(MMFLOAT);
+            int wstride = sizeof(MMFLOAT), cstride = sizeof(MMFLOAT);
             getcsargs(&cmdline, 11);
             if (!(argc & 1) || argc < 3)
                 StandardError(2);
-            getargaddress(argv[0], &x1ptr, &x1fptr, &n);
+            getargaddress(argv[0], &x1ptr, &x1fptr, &n, &x1stride);
             if (n != 1)
             {
                 if (argc < 7)
                     StandardError(2);
-                getargaddress(argv[2], &y1ptr, &y1fptr, &n);
-                getargaddress(argv[4], &x2ptr, &x2fptr, &n);
-                getargaddress(argv[6], &y2ptr, &y2fptr, &n);
+                getargaddress(argv[2], &y1ptr, &y1fptr, &n, &y1stride);
+                getargaddress(argv[4], &x2ptr, &x2fptr, &n, &x2stride);
+                getargaddress(argv[6], &y2ptr, &y2fptr, &n, &y2stride);
             }
             if (n == 1)
             {
@@ -2636,7 +2728,7 @@ void cmd_line(void)
                 w = 1; // setup the defaults
                 if (argc > 7 && *argv[8])
                 {
-                    getargaddress(argv[8], &wptr, &wfptr, &nw);
+                    getargaddress(argv[8], &wptr, &wfptr, &nw, &wstride);
                     if (nw == 1)
                         w = getint(argv[8], -100, 100);
                     else if (nw > 1)
@@ -2645,7 +2737,7 @@ void cmd_line(void)
                             n = nw; // adjust the dimensionality
                         for (i = 0; i < nw; i++)
                         {
-                            w = (wfptr == NULL ? wptr[i] : (int)wfptr[i]);
+                            w = (wfptr == NULL ? STRIDE_INT(wptr, i, wstride) : (int)STRIDE_FLOAT(wfptr, i, wstride));
                             if (w < -100 || w > 100)
                                 StandardErrorParam3(26, (int)w, 0, 100);
                         }
@@ -2653,7 +2745,7 @@ void cmd_line(void)
                 }
                 if (argc == 11)
                 {
-                    getargaddress(argv[10], &cptr, &cfptr, &nc);
+                    getargaddress(argv[10], &cptr, &cfptr, &nc, &cstride);
                     if (nc == 1)
                         c = getint(argv[10], 0, WHITE);
                     else if (nc > 1)
@@ -2662,7 +2754,7 @@ void cmd_line(void)
                             n = nc; // adjust the dimensionality
                         for (i = 0; i < nc; i++)
                         {
-                            c = (cfptr == NULL ? cptr[i] : (int)cfptr[i]);
+                            c = (cfptr == NULL ? STRIDE_INT(cptr, i, cstride) : (int)STRIDE_FLOAT(cfptr, i, cstride));
                             if (c < 0 || c > WHITE)
                                 StandardErrorParam3(26, (int)c, 0, WHITE);
                         }
@@ -2670,14 +2762,14 @@ void cmd_line(void)
                 }
                 for (i = 0; i < n; i++)
                 {
-                    x1 = (x1fptr == NULL ? x1ptr[i] : (int)x1fptr[i]);
-                    y1 = (y1fptr == NULL ? y1ptr[i] : (int)y1fptr[i]);
-                    x2 = (x2fptr == NULL ? x2ptr[i] : (int)x2fptr[i]);
-                    y2 = (y2fptr == NULL ? y2ptr[i] : (int)y2fptr[i]);
+                    x1 = (x1fptr == NULL ? STRIDE_INT(x1ptr, i, x1stride) : (int)STRIDE_FLOAT(x1fptr, i, x1stride));
+                    y1 = (y1fptr == NULL ? STRIDE_INT(y1ptr, i, y1stride) : (int)STRIDE_FLOAT(y1fptr, i, y1stride));
+                    x2 = (x2fptr == NULL ? STRIDE_INT(x2ptr, i, x2stride) : (int)STRIDE_FLOAT(x2fptr, i, x2stride));
+                    y2 = (y2fptr == NULL ? STRIDE_INT(y2ptr, i, y2stride) : (int)STRIDE_FLOAT(y2fptr, i, y2stride));
                     if (nw > 1)
-                        w = (wfptr == NULL ? wptr[i] : (int)wfptr[i]);
+                        w = (wfptr == NULL ? STRIDE_INT(wptr, i, wstride) : (int)STRIDE_FLOAT(wfptr, i, wstride));
                     if (nc > 1)
-                        c = (cfptr == NULL ? cptr[i] : (int)cfptr[i]);
+                        c = (cfptr == NULL ? STRIDE_INT(cptr, i, cstride) : (int)STRIDE_FLOAT(cfptr, i, cstride));
                     if (w)
                         DrawLine(x1, y1, x2, y2, w, c);
                 }
@@ -2691,16 +2783,18 @@ void cmd_line(void)
 void cmd_box(void)
 {
     int x1, y1, w = 0, c = 0, f = 0, n = 0, i, nc = 0, nw = 0, nf = 0, hmod, wmod, nwidth = 0, nheight = 0, width = 0, height = 0;
+    int x1stride = sizeof(MMFLOAT), y1stride = sizeof(MMFLOAT), wistride = sizeof(MMFLOAT), hstride = sizeof(MMFLOAT);
+    int wstride = sizeof(MMFLOAT), cstride = sizeof(MMFLOAT), fstride = sizeof(MMFLOAT);
     long long int *x1ptr, *y1ptr, *wiptr, *hptr, *wptr, *cptr, *fptr;
     MMFLOAT *x1fptr, *y1fptr, *wifptr, *hfptr, *wfptr, *cfptr, *ffptr;
     getcsargs(&cmdline, 13);
     CheckDisplay();
     if (!(argc & 1) || argc < 7)
         StandardError(2);
-    getargaddress(argv[0], &x1ptr, &x1fptr, &n);
+    getargaddress(argv[0], &x1ptr, &x1fptr, &n, &x1stride);
     if (n != 1)
     {
-        getargaddress(argv[2], &y1ptr, &y1fptr, &n);
+        getargaddress(argv[2], &y1ptr, &y1fptr, &n, &y1stride);
     }
     if (n == 1)
     {
@@ -2724,7 +2818,7 @@ void cmd_box(void)
     }
     else
     {
-        getargaddress(argv[4], &wiptr, &wifptr, &nwidth);
+        getargaddress(argv[4], &wiptr, &wifptr, &nwidth, &wistride);
         if (nwidth == 1)
             width = getint(argv[4], 1, HRes);
         else if (nwidth > 1)
@@ -2733,12 +2827,12 @@ void cmd_box(void)
                 n = nwidth; // adjust the dimensionality
             for (i = 0; i < nwidth; i++)
             {
-                width = (wifptr == NULL ? wiptr[i] : (int)wifptr[i]);
+                width = (wifptr == NULL ? STRIDE_INT(wiptr, i, wistride) : (int)STRIDE_FLOAT(wifptr, i, wistride));
                 if (width < 1 || width > HRes)
                     error("Width % is invalid (valid is % to %)", (int)width, 1, HRes);
             }
         }
-        getargaddress(argv[6], &hptr, &hfptr, &nheight);
+        getargaddress(argv[6], &hptr, &hfptr, &nheight, &hstride);
         if (nheight == 1)
             height = getint(argv[6], 1, VRes);
         else if (nheight > 1)
@@ -2747,7 +2841,7 @@ void cmd_box(void)
                 n = nheight; // adjust the dimensionality
             for (i = 0; i < nheight; i++)
             {
-                height = (hfptr == NULL ? hptr[i] : (int)hfptr[i]);
+                height = (hfptr == NULL ? STRIDE_INT(hptr, i, hstride) : (int)STRIDE_FLOAT(hfptr, i, hstride));
                 if (height < 1 || height > VRes)
                     error("Height % is invalid (valid is % to %)", (int)height, 1, VRes);
             }
@@ -2756,7 +2850,7 @@ void cmd_box(void)
         w = 1; // setup the defaults
         if (argc > 7 && *argv[8])
         {
-            getargaddress(argv[8], &wptr, &wfptr, &nw);
+            getargaddress(argv[8], &wptr, &wfptr, &nw, &wstride);
             if (nw == 1)
                 w = getint(argv[8], 0, 100);
             else if (nw > 1)
@@ -2765,7 +2859,7 @@ void cmd_box(void)
                     n = nw; // adjust the dimensionality
                 for (i = 0; i < nw; i++)
                 {
-                    w = (wfptr == NULL ? wptr[i] : (int)wfptr[i]);
+                    w = (wfptr == NULL ? STRIDE_INT(wptr, i, wstride) : (int)STRIDE_FLOAT(wfptr, i, wstride));
                     if (w < 0 || w > 100)
                         StandardErrorParam3(26, (int)w, 0, 100);
                 }
@@ -2773,7 +2867,7 @@ void cmd_box(void)
         }
         if (argc > 9 && *argv[10])
         {
-            getargaddress(argv[10], &cptr, &cfptr, &nc);
+            getargaddress(argv[10], &cptr, &cfptr, &nc, &cstride);
             if (nc == 1)
                 c = getint(argv[10], 0, WHITE);
             else if (nc > 1)
@@ -2782,7 +2876,7 @@ void cmd_box(void)
                     n = nc; // adjust the dimensionality
                 for (i = 0; i < nc; i++)
                 {
-                    c = (cfptr == NULL ? cptr[i] : (int)cfptr[i]);
+                    c = (cfptr == NULL ? STRIDE_INT(cptr, i, cstride) : (int)STRIDE_FLOAT(cfptr, i, cstride));
                     if (c < 0 || c > WHITE)
                         StandardErrorParam3(26, (int)c, 0, WHITE);
                 }
@@ -2790,7 +2884,7 @@ void cmd_box(void)
         }
         if (argc == 13)
         {
-            getargaddress(argv[12], &fptr, &ffptr, &nf);
+            getargaddress(argv[12], &fptr, &ffptr, &nf, &fstride);
             if (nf == 1)
                 f = getint(argv[12], 0, WHITE);
             else if (nf > 1)
@@ -2799,7 +2893,7 @@ void cmd_box(void)
                     n = nf; // adjust the dimensionality
                 for (i = 0; i < nf; i++)
                 {
-                    f = (ffptr == NULL ? fptr[i] : (int)ffptr[i]);
+                    f = (ffptr == NULL ? STRIDE_INT(fptr, i, fstride) : (int)STRIDE_FLOAT(ffptr, i, fstride));
                     if (f < -1 || f > WHITE)
                         StandardErrorParam3(26, (int)f, -1, WHITE);
                 }
@@ -2807,20 +2901,20 @@ void cmd_box(void)
         }
         for (i = 0; i < n; i++)
         {
-            x1 = (x1fptr == NULL ? x1ptr[i] : (int)x1fptr[i]);
-            y1 = (y1fptr == NULL ? y1ptr[i] : (int)y1fptr[i]);
+            x1 = (x1fptr == NULL ? STRIDE_INT(x1ptr, i, x1stride) : (int)STRIDE_FLOAT(x1fptr, i, x1stride));
+            y1 = (y1fptr == NULL ? STRIDE_INT(y1ptr, i, y1stride) : (int)STRIDE_FLOAT(y1fptr, i, y1stride));
             if (nwidth > 1)
-                width = (wifptr == NULL ? wiptr[i] : (int)wifptr[i]);
+                width = (wifptr == NULL ? STRIDE_INT(wiptr, i, wistride) : (int)STRIDE_FLOAT(wifptr, i, wistride));
             if (nheight > 1)
-                height = (hfptr == NULL ? hptr[i] : (int)hfptr[i]);
+                height = (hfptr == NULL ? STRIDE_INT(hptr, i, hstride) : (int)STRIDE_FLOAT(hfptr, i, hstride));
             wmod = (width > 0 ? -1 : 1);
             hmod = (height > 0 ? -1 : 1);
             if (nw > 1)
-                w = (wfptr == NULL ? wptr[i] : (int)wfptr[i]);
+                w = (wfptr == NULL ? STRIDE_INT(wptr, i, wstride) : (int)STRIDE_FLOAT(wfptr, i, wstride));
             if (nc > 1)
-                c = (cfptr == NULL ? cptr[i] : (int)cfptr[i]);
+                c = (cfptr == NULL ? STRIDE_INT(cptr, i, cstride) : (int)STRIDE_FLOAT(cfptr, i, cstride));
             if (nf > 1)
-                f = (ffptr == NULL ? fptr[i] : (int)ffptr[i]);
+                f = (ffptr == NULL ? STRIDE_INT(fptr, i, fstride) : (int)STRIDE_FLOAT(ffptr, i, fstride));
             if (width != 0 && height != 0)
                 DrawBox(x1, y1, x1 + width + wmod, y1 + height + hmod, w, c, f);
         }
@@ -3080,8 +3174,8 @@ void cmd_bezier(void)
     getcsargs(&cmdline, 7);
     if (argc < 3)
         SyntaxError();
-    countx = parseintegerarray(argv[0], &x, 1, 1, NULL, false);
-    county = parseintegerarray(argv[2], &y, 2, 1, NULL, false);
+    countx = parseintegerarray(argv[0], &x, 1, 1, NULL, false, NULL);
+    county = parseintegerarray(argv[2], &y, 2, 1, NULL, false, NULL);
     if (countx != county)
         StandardError(16);
     int n = countx;
@@ -3288,11 +3382,23 @@ static void fill_begin_fill()
     main_fill_poly_vertex_count = 0;
 }
 
+// Edge structure for polygon fill - pre-computed edge data
+typedef struct
+{
+    TFLOAT x0, y0, x1, y1;
+    TFLOAT dx, dy;
+    int valid;
+} FillEdge;
+
 static void fill_end_fill(int count, int ystart, int yend)
 {
-    // Use stack for typical polygon sizes
-    TFLOAT nodeX_stack[256];
-    TFLOAT *nodeX = (count <= 256) ? nodeX_stack : GetMemory(count * sizeof(TFLOAT));
+    // Dynamically allocate arrays to reduce stack usage
+    TFLOAT *nodeX = GetMemory(count * sizeof(TFLOAT));
+    if (nodeX == NULL)
+    {
+        error("Not enough memory for polygon fill");
+        return;
+    }
 
     const int f = (main_fill.fill_color.red << 16) |
                   (main_fill.fill_color.green << 8) |
@@ -3303,16 +3409,14 @@ static void fill_end_fill(int count, int ystart, int yend)
 
     const int vertex_count = main_fill_poly_vertex_count;
 
-    // Pre-compute edge data to avoid redundant calculations
-    typedef struct
+    // Dynamically allocate edge array
+    FillEdge *pEdges = GetMemory(vertex_count * sizeof(FillEdge));
+    if (pEdges == NULL)
     {
-        TFLOAT x0, y0, x1, y1;
-        TFLOAT dx, dy;
-        int valid;
-    } Edge;
-
-    Edge edges[256]; // Adjust size as needed
-    Edge *pEdges = (vertex_count <= 256) ? edges : GetMemory(vertex_count * sizeof(Edge));
+        FreeMemory((void *)nodeX);
+        error("Not enough memory for polygon edges");
+        return;
+    }
 
     // Pre-process edges
     for (int i = 0; i < vertex_count; i++)
@@ -3341,7 +3445,7 @@ static void fill_end_fill(int count, int ystart, int yend)
             if (!pEdges[i].valid)
                 continue;
 
-            const Edge *e = &pEdges[i];
+            const FillEdge *e = &pEdges[i];
 
             // Edge crossing check
             if ((e->y0 < yf && e->y1 >= yf) || (e->y1 < yf && e->y0 >= yf))
@@ -3401,44 +3505,44 @@ static void fill_end_fill(int count, int ystart, int yend)
                  (int)(pEdges[i].x1 + 0.5f), (int)(pEdges[i].y1 + 0.5f), 1, c);
     }
 
-    if (vertex_count > 256)
-        FreeMemory((void *)pEdges);
-    if (count > 256)
-        FreeMemory((void *)nodeX);
+    // Free dynamically allocated memory
+    FreeMemory((void *)pEdges);
+    FreeMemory((void *)nodeX);
 }
 void polygon(unsigned char *p, int close)
 {
     int xcount = 0;
     long long int *xptr = NULL, *yptr = NULL, xptr2 = 0, yptr2 = 0, *polycount = NULL, *cptr = NULL, *fptr = NULL;
     MMFLOAT *polycountf = NULL, *cfptr = NULL, *ffptr = NULL, *xfptr = NULL, *yfptr = NULL, xfptr2 = 0, yfptr2 = 0;
-    int i, f = 0, c, xtot = 0, ymax = 0, ymin = 1000000;
+    int i, f = 0, c, xtot = 0, ymax = 0, ymin = 1000000, idx = 0;
+    int xstride = sizeof(MMFLOAT), ystride = sizeof(MMFLOAT);
     int n = 0, nx = 0, ny = 0, nc = 0, nf = 0;
     getcsargs(&p, 9);
     CheckDisplay();
-    getargaddress(argv[0], &polycount, &polycountf, &n);
+    getargaddress(argv[0], &polycount, &polycountf, &n, NULL);
     if (n == 1)
     {
         xcount = xtot = getinteger(argv[0]);
         if ((xcount < 3 || xcount > 9999) && xcount != 0)
             error("Invalid number of vertices");
-        getargaddress(argv[2], &xptr, &xfptr, &nx);
+        getargaddress(argv[2], &xptr, &xfptr, &nx, &xstride);
         if (xcount == 0)
         {
             xcount = xtot = nx;
         }
         if (nx < xtot)
             error("X Dimensions %", nx);
-        getargaddress(argv[4], &yptr, &yfptr, &ny);
+        getargaddress(argv[4], &yptr, &yfptr, &ny, &ystride);
         if (ny < xtot)
             error("Y Dimensions %", ny);
         if (xptr)
-            xptr2 = *xptr;
+            xptr2 = STRIDE_INT(xptr, 0, xstride);
         else
-            xfptr2 = *xfptr;
+            xfptr2 = STRIDE_FLOAT(xfptr, 0, xstride);
         if (yptr)
-            yptr2 = *yptr;
+            yptr2 = STRIDE_INT(yptr, 0, ystride);
         else
-            yfptr2 = *yfptr;
+            yfptr2 = STRIDE_FLOAT(yfptr, 0, ystride);
         c = gui_fcolour; // setup the defaults
         if (argc > 5 && *argv[6])
             c = getint(argv[6], 0, WHITE);
@@ -3451,12 +3555,14 @@ void polygon(unsigned char *p, int close)
             fill_set_pen_color((c >> 16) & 0xFF, (c >> 8) & 0xFF, c & 0xFF);
             fill_begin_fill();
         }
+        idx = 0;
         for (i = 0; i < xcount - 1; i++)
         {
             if (argc > 7)
             {
-                main_fill_polyX[main_fill_poly_vertex_count] = (xfptr == NULL ? (TFLOAT)*xptr++ : (TFLOAT)*xfptr++);
-                main_fill_polyY[main_fill_poly_vertex_count] = (yfptr == NULL ? (TFLOAT)*yptr++ : (TFLOAT)*yfptr++);
+                main_fill_polyX[main_fill_poly_vertex_count] = (xfptr == NULL ? (TFLOAT)STRIDE_INT(xptr, idx, xstride) : (TFLOAT)STRIDE_FLOAT(xfptr, idx, xstride));
+                main_fill_polyY[main_fill_poly_vertex_count] = (yfptr == NULL ? (TFLOAT)STRIDE_INT(yptr, idx, ystride) : (TFLOAT)STRIDE_FLOAT(yfptr, idx, ystride));
+                idx++;
                 if (main_fill_polyY[main_fill_poly_vertex_count] > ymax)
                     ymax = main_fill_polyY[main_fill_poly_vertex_count];
                 if (main_fill_polyY[main_fill_poly_vertex_count] < ymin)
@@ -3465,17 +3571,18 @@ void polygon(unsigned char *p, int close)
             }
             else
             {
-                int x1 = (xfptr == NULL ? *xptr++ : (int)*xfptr++);
-                int x2 = (xfptr == NULL ? *xptr : (int)*xfptr);
-                int y1 = (yfptr == NULL ? *yptr++ : (int)*yfptr++);
-                int y2 = (yfptr == NULL ? *yptr : (int)*yfptr);
+                int x1 = (xfptr == NULL ? STRIDE_INT(xptr, idx, xstride) : (int)STRIDE_FLOAT(xfptr, idx, xstride));
+                int x2 = (xfptr == NULL ? STRIDE_INT(xptr, idx + 1, xstride) : (int)STRIDE_FLOAT(xfptr, idx + 1, xstride));
+                int y1 = (yfptr == NULL ? STRIDE_INT(yptr, idx, ystride) : (int)STRIDE_FLOAT(yfptr, idx, ystride));
+                int y2 = (yfptr == NULL ? STRIDE_INT(yptr, idx + 1, ystride) : (int)STRIDE_FLOAT(yfptr, idx + 1, ystride));
+                idx++;
                 DrawLine(x1, y1, x2, y2, 1, c);
             }
         }
         if (argc > 7)
         {
-            main_fill_polyX[main_fill_poly_vertex_count] = (xfptr == NULL ? (TFLOAT)*xptr++ : (TFLOAT)*xfptr++);
-            main_fill_polyY[main_fill_poly_vertex_count] = (yfptr == NULL ? (TFLOAT)*yptr++ : (TFLOAT)*yfptr++);
+            main_fill_polyX[main_fill_poly_vertex_count] = (xfptr == NULL ? (TFLOAT)STRIDE_INT(xptr, idx, xstride) : (TFLOAT)STRIDE_FLOAT(xfptr, idx, xstride));
+            main_fill_polyY[main_fill_poly_vertex_count] = (yfptr == NULL ? (TFLOAT)STRIDE_INT(yptr, idx, ystride) : (TFLOAT)STRIDE_FLOAT(yfptr, idx, ystride));
             if (main_fill_polyY[main_fill_poly_vertex_count] > ymax)
                 ymax = main_fill_polyY[main_fill_poly_vertex_count];
             if (main_fill_polyY[main_fill_poly_vertex_count] < ymin)
@@ -3510,9 +3617,9 @@ void polygon(unsigned char *p, int close)
         }
         else if (close)
         {
-            int x1 = (xfptr == NULL ? *xptr : (int)*xfptr);
+            int x1 = (xfptr == NULL ? STRIDE_INT(xptr, idx, xstride) : (int)STRIDE_FLOAT(xfptr, idx, xstride));
             int x2 = (xfptr == NULL ? xptr2 : (int)xfptr2);
-            int y1 = (yfptr == NULL ? *yptr : (int)*yfptr);
+            int y1 = (yfptr == NULL ? STRIDE_INT(yptr, idx, ystride) : (int)STRIDE_FLOAT(yfptr, idx, ystride));
             int y2 = (yfptr == NULL ? yptr2 : (int)yfptr2);
             DrawLine(x1, y1, x2, y2, 1, c);
         }
@@ -3533,17 +3640,17 @@ void polygon(unsigned char *p, int close)
                 error("Invalid number of vertices, polygon %", i);
         }
         n = i;
-        getargaddress(argv[2], &xptr, &xfptr, &nx);
+        getargaddress(argv[2], &xptr, &xfptr, &nx, &xstride);
         if (nx < xtot)
             error("X Dimensions %", nx);
-        getargaddress(argv[4], &yptr, &yfptr, &ny);
+        getargaddress(argv[4], &yptr, &yfptr, &ny, &ystride);
         if (ny < xtot)
             error("Y Dimensions %", ny);
         main_fill_polyX = (TFLOAT *)GetTempMainMemory(xmax * sizeof(TFLOAT));
         main_fill_polyY = (TFLOAT *)GetTempMainMemory(xmax * sizeof(TFLOAT));
         if (argc > 5 && *argv[6])
         { // foreground colour specified
-            getargaddress(argv[6], &cptr, &cfptr, &nc);
+            getargaddress(argv[6], &cptr, &cfptr, &nc, NULL);
             if (nc == 1)
                 for (i = 0; i < n; i++)
                     cc[i] = getint(argv[6], 0, WHITE);
@@ -3564,7 +3671,7 @@ void polygon(unsigned char *p, int close)
                 cc[i] = gui_fcolour;
         if (argc > 7)
         { // background colour specified
-            getargaddress(argv[8], &fptr, &ffptr, &nf);
+            getargaddress(argv[8], &fptr, &ffptr, &nf, NULL);
             if (nf == 1)
                 for (i = 0; i < n; i++)
                     ff[i] = getint(argv[8], 0, WHITE);
@@ -3581,16 +3688,17 @@ void polygon(unsigned char *p, int close)
             }
         }
         xstart = 0;
+        idx = 0;
         for (i = 0; i < n; i++)
         {
             if (xptr)
-                xptr2 = *xptr;
+                xptr2 = STRIDE_INT(xptr, idx, xstride);
             else
-                xfptr2 = *xfptr;
+                xfptr2 = STRIDE_FLOAT(xfptr, idx, xstride);
             if (yptr)
-                yptr2 = *yptr;
+                yptr2 = STRIDE_INT(yptr, idx, ystride);
             else
-                yfptr2 = *yfptr;
+                yfptr2 = STRIDE_FLOAT(yfptr, idx, ystride);
             ymax = 0;
             ymin = 1000000;
             main_fill_poly_vertex_count = 0;
@@ -3605,8 +3713,9 @@ void polygon(unsigned char *p, int close)
             {
                 if (argc > 7)
                 {
-                    main_fill_polyX[main_fill_poly_vertex_count] = (xfptr == NULL ? (TFLOAT)*xptr++ : (TFLOAT)*xfptr++);
-                    main_fill_polyY[main_fill_poly_vertex_count] = (yfptr == NULL ? (TFLOAT)*yptr++ : (TFLOAT)*yfptr++);
+                    main_fill_polyX[main_fill_poly_vertex_count] = (xfptr == NULL ? (TFLOAT)STRIDE_INT(xptr, idx, xstride) : (TFLOAT)STRIDE_FLOAT(xfptr, idx, xstride));
+                    main_fill_polyY[main_fill_poly_vertex_count] = (yfptr == NULL ? (TFLOAT)STRIDE_INT(yptr, idx, ystride) : (TFLOAT)STRIDE_FLOAT(yfptr, idx, ystride));
+                    idx++;
                     if (main_fill_polyY[main_fill_poly_vertex_count] > ymax)
                         ymax = main_fill_polyY[main_fill_poly_vertex_count];
                     if (main_fill_polyY[main_fill_poly_vertex_count] < ymin)
@@ -3615,17 +3724,19 @@ void polygon(unsigned char *p, int close)
                 }
                 else
                 {
-                    int x1 = (xfptr == NULL ? *xptr++ : (int)*xfptr++);
-                    int x2 = (xfptr == NULL ? *xptr : (int)*xfptr);
-                    int y1 = (yfptr == NULL ? *yptr++ : (int)*yfptr++);
-                    int y2 = (yfptr == NULL ? *yptr : (int)*yfptr);
+                    int x1 = (xfptr == NULL ? STRIDE_INT(xptr, idx, xstride) : (int)STRIDE_FLOAT(xfptr, idx, xstride));
+                    int x2 = (xfptr == NULL ? STRIDE_INT(xptr, idx + 1, xstride) : (int)STRIDE_FLOAT(xfptr, idx + 1, xstride));
+                    int y1 = (yfptr == NULL ? STRIDE_INT(yptr, idx, ystride) : (int)STRIDE_FLOAT(yfptr, idx, ystride));
+                    int y2 = (yfptr == NULL ? STRIDE_INT(yptr, idx + 1, ystride) : (int)STRIDE_FLOAT(yfptr, idx + 1, ystride));
+                    idx++;
                     DrawLine(x1, y1, x2, y2, 1, cc[i]);
                 }
             }
             if (argc > 7)
             {
-                main_fill_polyX[main_fill_poly_vertex_count] = (xfptr == NULL ? (TFLOAT)*xptr++ : (TFLOAT)*xfptr++);
-                main_fill_polyY[main_fill_poly_vertex_count] = (yfptr == NULL ? (TFLOAT)*yptr++ : (TFLOAT)*yfptr++);
+                main_fill_polyX[main_fill_poly_vertex_count] = (xfptr == NULL ? (TFLOAT)STRIDE_INT(xptr, idx, xstride) : (TFLOAT)STRIDE_FLOAT(xfptr, idx, xstride));
+                main_fill_polyY[main_fill_poly_vertex_count] = (yfptr == NULL ? (TFLOAT)STRIDE_INT(yptr, idx, ystride) : (TFLOAT)STRIDE_FLOAT(yfptr, idx, ystride));
+                idx++;
                 if (main_fill_polyY[main_fill_poly_vertex_count] > ymax)
                     ymax = main_fill_polyY[main_fill_poly_vertex_count];
                 if (main_fill_polyY[main_fill_poly_vertex_count] < ymin)
@@ -3660,19 +3771,12 @@ void polygon(unsigned char *p, int close)
             }
             else
             {
-                int x1 = (xfptr == NULL ? *xptr : (int)*xfptr);
+                int x1 = (xfptr == NULL ? STRIDE_INT(xptr, idx, xstride) : (int)STRIDE_FLOAT(xfptr, idx, xstride));
                 int x2 = (xfptr == NULL ? xptr2 : (int)xfptr2);
-                int y1 = (yfptr == NULL ? *yptr : (int)*yfptr);
+                int y1 = (yfptr == NULL ? STRIDE_INT(yptr, idx, ystride) : (int)STRIDE_FLOAT(yfptr, idx, ystride));
                 int y2 = (yfptr == NULL ? yptr2 : (int)yfptr2);
                 DrawLine(x1, y1, x2, y2, 1, cc[i]);
-                if (xfptr != NULL)
-                    xfptr++;
-                else
-                    xptr++;
-                if (yfptr != NULL)
-                    yfptr++;
-                else
-                    yptr++;
+                idx++;
             }
 
             xstart += xcount;
@@ -3688,18 +3792,20 @@ void cmd_polygon(void)
 void MIPS16 cmd_rbox(void)
 {
     int x1, y1, wi, h, w = 0, c = 0, f = 0, r = 0, n = 0, i, nc = 0, nw = 0, nf = 0, hmod, wmod;
+    int x1stride = sizeof(MMFLOAT), y1stride = sizeof(MMFLOAT), wistride = sizeof(MMFLOAT), hstride = sizeof(MMFLOAT);
+    int wstride = sizeof(MMFLOAT), cstride = sizeof(MMFLOAT), fstride = sizeof(MMFLOAT);
     long long int *x1ptr, *y1ptr, *wiptr, *hptr, *wptr, *cptr, *fptr;
     MMFLOAT *x1fptr, *y1fptr, *wifptr, *hfptr, *wfptr, *cfptr, *ffptr;
     getcsargs(&cmdline, 13);
     CheckDisplay();
     if (!(argc & 1) || argc < 7)
         StandardError(2);
-    getargaddress(argv[0], &x1ptr, &x1fptr, &n);
+    getargaddress(argv[0], &x1ptr, &x1fptr, &n, &x1stride);
     if (n != 1)
     {
-        getargaddress(argv[2], &y1ptr, &y1fptr, &n);
-        getargaddress(argv[4], &wiptr, &wifptr, &n);
-        getargaddress(argv[6], &hptr, &hfptr, &n);
+        getargaddress(argv[2], &y1ptr, &y1fptr, &n, &y1stride);
+        getargaddress(argv[4], &wiptr, &wifptr, &n, &wistride);
+        getargaddress(argv[6], &hptr, &hfptr, &n, &hstride);
     }
     if (n == 1)
     {
@@ -3728,7 +3834,7 @@ void MIPS16 cmd_rbox(void)
         w = 1; // setup the defaults
         if (argc > 7 && *argv[8])
         {
-            getargaddress(argv[8], &wptr, &wfptr, &nw);
+            getargaddress(argv[8], &wptr, &wfptr, &nw, &wstride);
             if (nw == 1)
                 w = getint(argv[8], 0, 100);
             else if (nw > 1)
@@ -3737,7 +3843,7 @@ void MIPS16 cmd_rbox(void)
                     n = nw; // adjust the dimensionality
                 for (i = 0; i < nw; i++)
                 {
-                    w = (wfptr == NULL ? wptr[i] : (int)wfptr[i]);
+                    w = (wfptr == NULL ? STRIDE_INT(wptr, i, wstride) : (int)STRIDE_FLOAT(wfptr, i, wstride));
                     if (w < 0 || w > 100)
                         StandardErrorParam3(26, (int)w, 0, 100);
                 }
@@ -3745,7 +3851,7 @@ void MIPS16 cmd_rbox(void)
         }
         if (argc > 9 && *argv[10])
         {
-            getargaddress(argv[10], &cptr, &cfptr, &nc);
+            getargaddress(argv[10], &cptr, &cfptr, &nc, &cstride);
             if (nc == 1)
                 c = getint(argv[10], 0, WHITE);
             else if (nc > 1)
@@ -3754,7 +3860,7 @@ void MIPS16 cmd_rbox(void)
                     n = nc; // adjust the dimensionality
                 for (i = 0; i < nc; i++)
                 {
-                    c = (cfptr == NULL ? cptr[i] : (int)cfptr[i]);
+                    c = (cfptr == NULL ? STRIDE_INT(cptr, i, cstride) : (int)STRIDE_FLOAT(cfptr, i, cstride));
                     if (c < 0 || c > WHITE)
                         StandardErrorParam3(26, (int)c, 0, WHITE);
                 }
@@ -3762,7 +3868,7 @@ void MIPS16 cmd_rbox(void)
         }
         if (argc == 13)
         {
-            getargaddress(argv[12], &fptr, &ffptr, &nf);
+            getargaddress(argv[12], &fptr, &ffptr, &nf, &fstride);
             if (nf == 1)
                 f = getint(argv[12], 0, WHITE);
             else if (nf > 1)
@@ -3771,7 +3877,7 @@ void MIPS16 cmd_rbox(void)
                     n = nf; // adjust the dimensionality
                 for (i = 0; i < nf; i++)
                 {
-                    f = (ffptr == NULL ? fptr[i] : (int)ffptr[i]);
+                    f = (ffptr == NULL ? STRIDE_INT(fptr, i, fstride) : (int)STRIDE_FLOAT(ffptr, i, fstride));
                     if (f < -1 || f > WHITE)
                         StandardErrorParam3(26, (int)f, -1, WHITE);
                 }
@@ -3779,18 +3885,18 @@ void MIPS16 cmd_rbox(void)
         }
         for (i = 0; i < n; i++)
         {
-            x1 = (x1fptr == NULL ? x1ptr[i] : (int)x1fptr[i]);
-            y1 = (y1fptr == NULL ? y1ptr[i] : (int)y1fptr[i]);
-            wi = (wifptr == NULL ? wiptr[i] : (int)wifptr[i]);
-            h = (hfptr == NULL ? hptr[i] : (int)hfptr[i]);
+            x1 = (x1fptr == NULL ? STRIDE_INT(x1ptr, i, x1stride) : (int)STRIDE_FLOAT(x1fptr, i, x1stride));
+            y1 = (y1fptr == NULL ? STRIDE_INT(y1ptr, i, y1stride) : (int)STRIDE_FLOAT(y1fptr, i, y1stride));
+            wi = (wifptr == NULL ? STRIDE_INT(wiptr, i, wistride) : (int)STRIDE_FLOAT(wifptr, i, wistride));
+            h = (hfptr == NULL ? STRIDE_INT(hptr, i, hstride) : (int)STRIDE_FLOAT(hfptr, i, hstride));
             wmod = (wi > 0 ? -1 : 1);
             hmod = (h > 0 ? -1 : 1);
             if (nw > 1)
-                w = (wfptr == NULL ? wptr[i] : (int)wfptr[i]);
+                w = (wfptr == NULL ? STRIDE_INT(wptr, i, wstride) : (int)STRIDE_FLOAT(wfptr, i, wstride));
             if (nc > 1)
-                c = (cfptr == NULL ? cptr[i] : (int)cfptr[i]);
+                c = (cfptr == NULL ? STRIDE_INT(cptr, i, cstride) : (int)STRIDE_FLOAT(cfptr, i, cstride));
             if (nf > 1)
-                f = (ffptr == NULL ? fptr[i] : (int)ffptr[i]);
+                f = (ffptr == NULL ? STRIDE_INT(fptr, i, fstride) : (int)STRIDE_FLOAT(ffptr, i, fstride));
             if (wi != 0 && h != 0)
                 DrawRBox(x1, y1, x1 + wi + wmod, y1 + h + hmod, w, c, f);
         }
@@ -3870,29 +3976,31 @@ void cmd_triangle(void)
         return;
     }
     int x1, y1, x2, y2, x3, y3, c = 0, f = 0, n = 0, i, nc = 0, nf = 0;
+    int x1stride = sizeof(MMFLOAT), y1stride = sizeof(MMFLOAT), x2stride = sizeof(MMFLOAT), y2stride = sizeof(MMFLOAT);
+    int x3stride = sizeof(MMFLOAT), y3stride = sizeof(MMFLOAT), cstride = sizeof(MMFLOAT), fstride = sizeof(MMFLOAT);
     long long int *x3ptr, *y3ptr, *x1ptr, *y1ptr, *x2ptr, *y2ptr, *fptr, *cptr;
     MMFLOAT *x3fptr, *y3fptr, *x1fptr, *y1fptr, *x2fptr, *y2fptr, *ffptr, *cfptr;
     getcsargs(&cmdline, 15);
     CheckDisplay();
     if (!(argc & 1) || argc < 11)
         StandardError(2);
-    getargaddress(argv[0], &x1ptr, &x1fptr, &n);
+    getargaddress(argv[0], &x1ptr, &x1fptr, &n, &x1stride);
     if (n != 1)
     {
         int cn = n;
-        getargaddress(argv[2], &y1ptr, &y1fptr, &n);
+        getargaddress(argv[2], &y1ptr, &y1fptr, &n, &y1stride);
         if (n < cn)
             cn = n;
-        getargaddress(argv[4], &x2ptr, &x2fptr, &n);
+        getargaddress(argv[4], &x2ptr, &x2fptr, &n, &x2stride);
         if (n < cn)
             cn = n;
-        getargaddress(argv[6], &y2ptr, &y2fptr, &n);
+        getargaddress(argv[6], &y2ptr, &y2fptr, &n, &y2stride);
         if (n < cn)
             cn = n;
-        getargaddress(argv[8], &x3ptr, &x3fptr, &n);
+        getargaddress(argv[8], &x3ptr, &x3fptr, &n, &x3stride);
         if (n < cn)
             cn = n;
-        getargaddress(argv[10], &y3ptr, &y3fptr, &n);
+        getargaddress(argv[10], &y3ptr, &y3fptr, &n, &y3stride);
         if (n < cn)
             cn = n;
         n = cn;
@@ -3919,16 +4027,16 @@ void cmd_triangle(void)
         f = -1;
         if (argc >= 13 && *argv[12])
         {
-            getargaddress(argv[12], &cptr, &cfptr, &nc);
+            getargaddress(argv[12], &cptr, &cfptr, &nc, &cstride);
             if (nc == 1)
-                c = getint(argv[10], 0, WHITE);
+                c = getint(argv[12], 0, WHITE);
             else if (nc > 1)
             {
                 if (nc > 1 && nc < n)
                     n = nc; // adjust the dimensionality
                 for (i = 0; i < nc; i++)
                 {
-                    c = (cfptr == NULL ? cptr[i] : (int)cfptr[i]);
+                    c = (cfptr == NULL ? STRIDE_INT(cptr, i, cstride) : (int)STRIDE_FLOAT(cfptr, i, cstride));
                     if (c < 0 || c > WHITE)
                         StandardErrorParam3(26, (int)c, 0, WHITE);
                 }
@@ -3936,7 +4044,7 @@ void cmd_triangle(void)
         }
         if (argc == 15)
         {
-            getargaddress(argv[14], &fptr, &ffptr, &nf);
+            getargaddress(argv[14], &fptr, &ffptr, &nf, &fstride);
             if (nf == 1)
                 f = getint(argv[14], -1, WHITE);
             else if (nf > 1)
@@ -3945,7 +4053,7 @@ void cmd_triangle(void)
                     n = nf; // adjust the dimensionality
                 for (i = 0; i < nf; i++)
                 {
-                    f = (ffptr == NULL ? fptr[i] : (int)ffptr[i]);
+                    f = (ffptr == NULL ? STRIDE_INT(fptr, i, fstride) : (int)STRIDE_FLOAT(ffptr, i, fstride));
                     if (f < -1 || f > WHITE)
                         StandardErrorParam3(26, (int)f, -1, WHITE);
                 }
@@ -3953,18 +4061,18 @@ void cmd_triangle(void)
         }
         for (i = 0; i < n; i++)
         {
-            x1 = (x1fptr == NULL ? x1ptr[i] : (int)x1fptr[i]);
-            y1 = (y1fptr == NULL ? y1ptr[i] : (int)y1fptr[i]);
-            x2 = (x2fptr == NULL ? x2ptr[i] : (int)x2fptr[i]);
-            y2 = (y2fptr == NULL ? y2ptr[i] : (int)y2fptr[i]);
-            x3 = (x3fptr == NULL ? x3ptr[i] : (int)x3fptr[i]);
-            y3 = (y3fptr == NULL ? y3ptr[i] : (int)y3fptr[i]);
+            x1 = (x1fptr == NULL ? STRIDE_INT(x1ptr, i, x1stride) : (int)STRIDE_FLOAT(x1fptr, i, x1stride));
+            y1 = (y1fptr == NULL ? STRIDE_INT(y1ptr, i, y1stride) : (int)STRIDE_FLOAT(y1fptr, i, y1stride));
+            x2 = (x2fptr == NULL ? STRIDE_INT(x2ptr, i, x2stride) : (int)STRIDE_FLOAT(x2fptr, i, x2stride));
+            y2 = (y2fptr == NULL ? STRIDE_INT(y2ptr, i, y2stride) : (int)STRIDE_FLOAT(y2fptr, i, y2stride));
+            x3 = (x3fptr == NULL ? STRIDE_INT(x3ptr, i, x3stride) : (int)STRIDE_FLOAT(x3fptr, i, x3stride));
+            y3 = (y3fptr == NULL ? STRIDE_INT(y3ptr, i, y3stride) : (int)STRIDE_FLOAT(y3fptr, i, y3stride));
             if (x1 == x2 && x1 == x3 && y1 == y2 && y1 == y3 && x1 == -1 && y1 == -1)
                 return;
             if (nc > 1)
-                c = (cfptr == NULL ? cptr[i] : (int)cfptr[i]);
+                c = (cfptr == NULL ? STRIDE_INT(cptr, i, cstride) : (int)STRIDE_FLOAT(cfptr, i, cstride));
             if (nf > 1)
-                f = (ffptr == NULL ? fptr[i] : (int)ffptr[i]);
+                f = (ffptr == NULL ? STRIDE_INT(fptr, i, fstride) : (int)STRIDE_FLOAT(ffptr, i, fstride));
             DrawTriangle(x1, y1, x2, y2, x3, y3, c, f);
         }
     }
@@ -4892,6 +5000,53 @@ void fun_mmvres(void)
 }
 extern BYTE BDEC_bReadHeader(BMPDECODER *pBmpDec, int fnbr);
 extern BYTE BMP_bDecode_memory(int x, int y, int xlen, int ylen, int fnbr, char *p);
+
+// Color lookup tables for sprite file loading
+// Mode 1 (alternate palette): ' '=0, 0-9, A-F map to specific colors
+static const uint32_t sprite_color_mode1[16] = {
+    BLACK, BLUE, MYRTLE, COBALT, MIDGREEN, CERULEAN, GREEN, CYAN,
+    RED, MAGENTA, RUST, FUCHSIA, BROWN, LILAC, YELLOW, WHITE};
+
+// Mode 0 (standard palette): ' '=0, 0-9, A-F map to specific colors
+static const uint32_t sprite_color_mode0[16] = {
+    BLACK, BLUE, GREEN, CYAN, RED, MAGENTA, YELLOW, WHITE,
+    MYRTLE, COBALT, MIDGREEN, CERULEAN, RUST, FUCHSIA, BROWN, LILAC};
+
+// Helper function to convert sprite file character to color index (0-15, or -1 for invalid)
+static inline int spriteCharToColorIndex(unsigned char c)
+{
+    if (c == ' ')
+        return -1; // transparent
+    if (c >= '0' && c <= '9')
+        return c - '0';
+    if (c >= 'A' && c <= 'F')
+        return c - 'A' + 10;
+    if (c >= 'a' && c <= 'f')
+        return c - 'a' + 10;
+    return -1; // invalid character treated as transparent
+}
+
+// Helper function to initialize a sprite buffer with default inactive values
+static void initSpriteBuff(int bnbr, int w, int h)
+{
+    spritebuff[bnbr].w = w;
+    spritebuff[bnbr].h = h;
+    spritebuff[bnbr].master = 0;
+    spritebuff[bnbr].mymaster = -1;
+    spritebuff[bnbr].x = SPRITE_POS_INACTIVE;
+    spritebuff[bnbr].y = SPRITE_POS_INACTIVE;
+    spritebuff[bnbr].layer = -1;
+    spritebuff[bnbr].next_x = SPRITE_POS_INACTIVE;
+    spritebuff[bnbr].next_y = SPRITE_POS_INACTIVE;
+    spritebuff[bnbr].active = false;
+    spritebuff[bnbr].lastcollisions = 0;
+    spritebuff[bnbr].edges = 0;
+    spritebuff[bnbr].boundsleft = NULL;
+    spritebuff[bnbr].boundsright = NULL;
+    spritebuff[bnbr].boundstop = NULL;
+    spritebuff[bnbr].boundsbottom = NULL;
+}
+
 void LIFOadd(int n)
 {
     int i, j = 0;
@@ -5031,12 +5186,12 @@ void MIPS16 closeallsprites(void)
         spritebuff[i].blitstoreptr = NULL;
         spritebuff[i].master = -1;
         spritebuff[i].mymaster = -1;
-        spritebuff[i].x = 10000;
-        spritebuff[i].y = 10000;
+        spritebuff[i].x = SPRITE_POS_INACTIVE;
+        spritebuff[i].y = SPRITE_POS_INACTIVE;
         spritebuff[i].w = 0;
         spritebuff[i].h = 0;
-        spritebuff[i].next_x = 10000;
-        spritebuff[i].next_y = 10000;
+        spritebuff[i].next_x = SPRITE_POS_INACTIVE;
+        spritebuff[i].next_y = SPRITE_POS_INACTIVE;
         spritebuff[i].layer = -1;
         spritebuff[i].active = false;
         spritebuff[i].edges = 0;
@@ -5050,73 +5205,126 @@ void MIPS16 closeallsprites(void)
     sprites_in_use = 0;
     hideall = 0;
 }
+
+void MIPS16 closeallstobjects(void)
+{
+    int i;
+    for (i = 1; i <= MAXSTOBJECTS; i++)
+    {
+        stobjects[i].x = 0;
+        stobjects[i].y = 0;
+        stobjects[i].w = 0;
+        stobjects[i].h = 0;
+        stobjects[i].active = 0;
+    }
+    STCollisionInterrupt = NULL;
+    STCollisionFound = false;
+    sprite_hit_st = -1;
+    st_which_collided = -1;
+}
+
+// Check for collisions between a sprite and all active static objects
+// Called from ProcessCollisions after sprite-to-sprite collision detection
+// Stores collision info in spritebuff[bnbr].collisions array
+void CheckSTCollisions(int bnbr, int *n)
+{
+    struct spritebuffer *sb = &spritebuff[bnbr];
+    int sw = sb->w;
+    int sh = sb->h;
+    int sx = sb->x;
+    int sy = sb->y;
+
+    for (int i = 1; i <= MAXSTOBJECTS; i++)
+    {
+        if (!stobjects[i].active)
+            continue;
+
+        // AABB intersection test
+        if (!(sx + sw <= stobjects[i].x ||
+              sx >= stobjects[i].x + stobjects[i].w ||
+              sy + sh <= stobjects[i].y ||
+              sy >= stobjects[i].y + stobjects[i].h))
+        {
+            // Collision detected - store in collisions array with high bit marker (0x80 + static object number)
+            if (*n < MAXCOLLISIONS)
+            {
+                sb->collisions[(*n)++] = (char)(0x80 | i); // Mark as ST collision with object number
+            }
+            STCollisionFound = true;
+            sprite_hit_st = bnbr;
+            st_which_collided = i;
+        }
+    }
+}
+
 void checklimits(int bnbr, int *n)
 {
     int maxW = HRes;
     int maxH = VRes;
-    spritebuff[bnbr].collisions[*n] = 0;
-    if (spritebuff[bnbr].x < 0)
+    struct spritebuffer *sb = &spritebuff[bnbr]; // Cache pointer for performance
+    sb->collisions[*n] = 0;
+    if (sb->x < 0)
     {
-        if (!(spritebuff[bnbr].edges & 1))
+        if (!(sb->edges & 1))
         {
-            spritebuff[bnbr].edges |= 1;
-            spritebuff[bnbr].collisions[*n] = (char)0xF1;
+            sb->edges |= 1;
+            sb->collisions[*n] = (char)0xF1;
             (*n)++;
         }
     }
     else
-        spritebuff[bnbr].edges &= ~1;
+        sb->edges &= ~1;
 
-    if (spritebuff[bnbr].y < 0)
+    if (sb->y < 0)
     {
-        if (!(spritebuff[bnbr].edges & 2))
+        if (!(sb->edges & 2))
         {
-            spritebuff[bnbr].edges |= 2;
-            if (spritebuff[bnbr].collisions[*n] & 0xF0)
-                spritebuff[bnbr].collisions[*n] |= 0xF2;
+            sb->edges |= 2;
+            if (sb->collisions[*n] & 0xF0)
+                sb->collisions[*n] |= 0xF2;
             else
             {
-                spritebuff[bnbr].collisions[*n] = (char)0xF2;
+                sb->collisions[*n] = (char)0xF2;
                 (*n)++;
             }
         }
     }
     else
-        spritebuff[bnbr].edges &= ~2;
+        sb->edges &= ~2;
 
-    if (spritebuff[bnbr].x + spritebuff[bnbr].w > maxW)
+    if (sb->x + sb->w > maxW)
     {
-        if (!(spritebuff[bnbr].edges & 4))
+        if (!(sb->edges & 4))
         {
-            spritebuff[bnbr].edges |= 4;
-            if (spritebuff[bnbr].collisions[*n] & 0xF0)
-                spritebuff[bnbr].collisions[*n] |= 0xF4;
+            sb->edges |= 4;
+            if (sb->collisions[*n] & 0xF0)
+                sb->collisions[*n] |= 0xF4;
             else
             {
-                spritebuff[bnbr].collisions[*n] = (char)0xF4;
+                sb->collisions[*n] = (char)0xF4;
                 (*n)++;
             }
         }
     }
     else
-        spritebuff[bnbr].edges &= ~4;
+        sb->edges &= ~4;
 
-    if (spritebuff[bnbr].y + spritebuff[bnbr].h > maxH)
+    if (sb->y + sb->h > maxH)
     {
-        if (!(spritebuff[bnbr].edges & 8))
+        if (!(sb->edges & 8))
         {
-            spritebuff[bnbr].edges |= 8;
-            if (spritebuff[bnbr].collisions[*n] & 0xF0)
-                spritebuff[bnbr].collisions[*n] |= 0xF8;
+            sb->edges |= 8;
+            if (sb->collisions[*n] & 0xF0)
+                sb->collisions[*n] |= 0xF8;
             else
             {
-                spritebuff[bnbr].collisions[*n] = (char)0xF8;
+                sb->collisions[*n] = (char)0xF8;
                 (*n)++;
             }
         }
     }
     else
-        spritebuff[bnbr].edges &= ~8;
+        sb->edges &= ~8;
 }
 void ProcessCollisions(int bnbr)
 {
@@ -5127,43 +5335,45 @@ void ProcessCollisions(int bnbr)
     CollisionFound = false;
     sprite_which_collided = -1;
     uint64_t mask, mymask = (uint64_t)1 << ((uint64_t)bnbr - (uint64_t)1);
+    struct spritebuffer *sb = &spritebuff[bnbr]; // Cache pointer for performance
     memset(spritebuff[0].collisions, 0, MAXCOLLISIONS);
     if (bnbr != 0)
-    {                                                          // a specific sprite has moved
-        memset(spritebuff[bnbr].collisions, 0, MAXCOLLISIONS); // clear our previous collisions
-        if (spritebuff[bnbr].layer != 0)
+    {                                             // a specific sprite has moved
+        memset(sb->collisions, 0, MAXCOLLISIONS); // clear our previous collisions
+        if (sb->layer != 0)
         {
-            if (layer_in_use[spritebuff[bnbr].layer] + layer_in_use[0] > 1)
+            if (layer_in_use[sb->layer] + layer_in_use[0] > 1)
             { // other sprites in this layer
                 for (k = 1; k <= MAXBLITBUF; k++)
                 {
+                    struct spritebuffer *sk = &spritebuff[k]; // Cache inner loop pointer
                     mask = (uint64_t)1 << ((uint64_t)k - (uint64_t)1);
-                    if (!(spritebuff[k].active))
+                    if (!(sk->active))
                     {
-                        spritebuff[bnbr].lastcollisions &= ~mask;
+                        sb->lastcollisions &= ~mask;
                         continue;
                     }
                     if (k == bnbr)
                         continue;
-                    if (j == layer_in_use[spritebuff[bnbr].layer] + layer_in_use[0])
+                    if (j == layer_in_use[sb->layer] + layer_in_use[0])
                         break; // nothing left to process
-                    if ((spritebuff[k].layer == spritebuff[bnbr].layer || spritebuff[k].layer == 0))
+                    if ((sk->layer == sb->layer || sk->layer == 0))
                     {
                         j++;
-                        if (!(spritebuff[k].x + spritebuff[k].w < spritebuff[bnbr].x ||
-                              spritebuff[k].x > spritebuff[bnbr].x + spritebuff[bnbr].w ||
-                              spritebuff[k].y + spritebuff[k].h < spritebuff[bnbr].y ||
-                              spritebuff[k].y > spritebuff[bnbr].y + spritebuff[bnbr].h))
+                        if (!(sk->x + sk->w < sb->x ||
+                              sk->x > sb->x + sb->w ||
+                              sk->y + sk->h < sb->y ||
+                              sk->y > sb->y + sb->h))
                         {
-                            if (n < MAXCOLLISIONS && !(spritebuff[bnbr].lastcollisions & mask))
-                                spritebuff[bnbr].collisions[n++] = k;
-                            spritebuff[bnbr].lastcollisions |= mask;
-                            spritebuff[k].lastcollisions |= mymask;
+                            if (n < MAXCOLLISIONS && !(sb->lastcollisions & mask))
+                                sb->collisions[n++] = k;
+                            sb->lastcollisions |= mask;
+                            sk->lastcollisions |= mymask;
                         }
                         else
                         {
-                            spritebuff[bnbr].lastcollisions &= ~mask;
-                            spritebuff[k].lastcollisions &= ~mymask;
+                            sb->lastcollisions &= ~mask;
+                            sk->lastcollisions &= ~mymask;
                         }
                     }
                 }
@@ -5173,37 +5383,40 @@ void ProcessCollisions(int bnbr)
         {
             for (k = 1; k <= MAXBLITBUF; k++)
             {
+                struct spritebuffer *sk = &spritebuff[k]; // Cache inner loop pointer
                 if (j == sprites_in_use)
                     break; // nothing left to process
                 if (k == bnbr)
                     continue;
                 mask = (uint64_t)1 << ((uint64_t)k - (uint64_t)1);
-                if (!(spritebuff[k].active))
+                if (!(sk->active))
                 {
-                    spritebuff[bnbr].lastcollisions &= ~mask;
+                    sb->lastcollisions &= ~mask;
                     continue;
                 }
                 else
                     j++;
-                if (!(spritebuff[k].x + spritebuff[k].w < spritebuff[bnbr].x ||
-                      spritebuff[k].x > spritebuff[bnbr].x + spritebuff[bnbr].w ||
-                      spritebuff[k].y + spritebuff[k].h < spritebuff[bnbr].y ||
-                      spritebuff[k].y > spritebuff[bnbr].y + spritebuff[bnbr].h))
+                if (!(sk->x + sk->w < sb->x ||
+                      sk->x > sb->x + sb->w ||
+                      sk->y + sk->h < sb->y ||
+                      sk->y > sb->y + sb->h))
                 {
-                    if (n < MAXCOLLISIONS && !(spritebuff[bnbr].lastcollisions & mask))
-                        spritebuff[bnbr].collisions[n++] = k;
-                    spritebuff[bnbr].lastcollisions |= mask;
-                    spritebuff[k].lastcollisions |= mymask;
+                    if (n < MAXCOLLISIONS && !(sb->lastcollisions & mask))
+                        sb->collisions[n++] = k;
+                    sb->lastcollisions |= mask;
+                    sk->lastcollisions |= mymask;
                 }
                 else
                 {
-                    spritebuff[bnbr].lastcollisions &= ~mask;
-                    spritebuff[k].lastcollisions &= ~mymask;
+                    sb->lastcollisions &= ~mask;
+                    sk->lastcollisions &= ~mymask;
                 }
             }
         }
         // now look for collisions with the edge of the screen
         checklimits(bnbr, &n);
+        // now look for collisions with static objects
+        CheckSTCollisions(bnbr, &n);
         if (n > 1)
         {
             CollisionFound = true;
@@ -5215,49 +5428,52 @@ void ProcessCollisions(int bnbr)
     { // the background layer has moved
         j = 0;
         for (k = 1; k <= MAXBLITBUF; k++)
-        { // loop through all sprites
+        {                                             // loop through all sprites
+            struct spritebuffer *sk = &spritebuff[k]; // Cache pointer for performance
             mask = (uint64_t)1 << ((uint64_t)k - (uint64_t)1);
             n = 1;
             int kk, jj = 1;
             if (j == sprites_in_use)
                 break; // nothing left to process
-            if (spritebuff[k].active)
+            if (sk->active)
             { // sprite found
-                memset(spritebuff[k].collisions, 0, MAXCOLLISIONS);
+                memset(sk->collisions, 0, MAXCOLLISIONS);
                 j++;
-                if (layer_in_use[spritebuff[k].layer] + layer_in_use[0] > 1)
+                if (layer_in_use[sk->layer] + layer_in_use[0] > 1)
                 { // other sprites in this layer
                     for (kk = 1; kk <= MAXBLITBUF; kk++)
                     {
+                        struct spritebuffer *skk = &spritebuff[kk]; // Cache inner loop pointer
                         if (kk == k)
                             continue;
-                        if (jj == layer_in_use[spritebuff[k].layer] + layer_in_use[0])
+                        if (jj == layer_in_use[sk->layer] + layer_in_use[0])
                             break; // nothing left to process
-                        if ((spritebuff[kk].layer == spritebuff[k].layer || spritebuff[kk].layer == 0))
+                        if ((skk->layer == sk->layer || skk->layer == 0))
                         {
                             jj++;
-                            if (!(spritebuff[kk].x + spritebuff[kk].w < spritebuff[k].x ||
-                                  spritebuff[kk].x > spritebuff[k].x + spritebuff[k].w ||
-                                  spritebuff[kk].y + spritebuff[kk].h < spritebuff[k].y ||
-                                  spritebuff[kk].y > spritebuff[k].y + spritebuff[k].h))
+                            if (!(skk->x + skk->w < sk->x ||
+                                  skk->x > sk->x + sk->w ||
+                                  skk->y + skk->h < sk->y ||
+                                  skk->y > sk->y + sk->h))
                             {
-                                if (n < MAXCOLLISIONS && !(spritebuff[k].lastcollisions & mask))
-                                    spritebuff[k].collisions[n++] = kk;
-                                spritebuff[k].lastcollisions |= mask;
+                                if (n < MAXCOLLISIONS && !(sk->lastcollisions & mask))
+                                    sk->collisions[n++] = kk;
+                                sk->lastcollisions |= mask;
                             }
                             else
                             {
-                                spritebuff[k].lastcollisions &= ~mask;
+                                sk->lastcollisions &= ~mask;
                             }
                         }
                     }
                 }
                 checklimits(k, &n);
+                CheckSTCollisions(k, &n);
                 if (n > 1 && n < MAXCOLLISIONS && bcol < MAXCOLLISIONS)
                 {
                     spritebuff[0].collisions[bcol] = k;
                     bcol++;
-                    spritebuff[k].collisions[0] = n - 1;
+                    sk->collisions[0] = n - 1;
                 }
             }
         }
@@ -5269,15 +5485,15 @@ void ProcessCollisions(int bnbr)
         }
     }
 }
-void blithide(int bnbr, int free)
+void blithide(int bnbr)
 {
-    int w, h, x1, y1;
-    w = spritebuff[bnbr].w;
-    h = spritebuff[bnbr].h;
-    x1 = spritebuff[bnbr].x;
-    y1 = spritebuff[bnbr].y;
-    spritebuff[bnbr].active = 0;
-    DrawBufferFast(x1, y1, x1 + w - 1, y1 + h - 1, -1, (unsigned char *)spritebuff[bnbr].blitstoreptr);
+    struct spritebuffer *sb = &spritebuff[bnbr]; // Cache pointer for performance
+    int w = sb->w;
+    int h = sb->h;
+    int x1 = sb->x;
+    int y1 = sb->y;
+    sb->active = 0;
+    DrawBufferFast(x1, y1, x1 + w - 1, y1 + h - 1, -1, (unsigned char *)sb->blitstoreptr);
 }
 void expandpixel(volatile unsigned char *ii, volatile unsigned char *oo, int n, int mode)
 {
@@ -5348,22 +5564,23 @@ void contractpixel(volatile unsigned char *ii, volatile unsigned char *oo, int n
 
 void BlitShowBuffer(int bnbr, int x1, int y1, int mode)
 {
+    struct spritebuffer *sb = &spritebuff[bnbr]; // Cache pointer for performance
     char *current;
     int x, xx, y, yy, rotation, fullmode = mode;
     mode &= 7;
-    rotation = spritebuff[bnbr].rotation;
-    current = spritebuff[bnbr].blitstoreptr;
+    rotation = sb->rotation;
+    current = sb->blitstoreptr;
     int w, h;
-    if (spritebuff[bnbr].spritebuffptr != NULL)
+    if (sb->spritebuffptr != NULL)
     {
-        w = spritebuff[bnbr].w;
-        h = spritebuff[bnbr].h;
-        if (!(mode == 0 || mode & 4) && spritebuff[bnbr].active)
+        w = sb->w;
+        h = sb->h;
+        if (!(mode == 0 || mode & 4) && sb->active)
         {
-            DrawBufferFast(spritebuff[bnbr].x, spritebuff[bnbr].y, spritebuff[bnbr].x + w - 1, spritebuff[bnbr].y + h - 1, -1, (unsigned char *)current);
+            DrawBufferFast(sb->x, sb->y, sb->x + w - 1, sb->y + h - 1, -1, (unsigned char *)current);
         }
-        spritebuff[bnbr].x = x1;
-        spritebuff[bnbr].y = y1;
+        sb->x = x1;
+        sb->y = y1;
         if (!(mode == 2))
             ReadBufferFast(x1, y1, x1 + w - 1, y1 + h - 1, (unsigned char *)current);
         // we now have the old screen image stored together with the coordinates
@@ -5371,7 +5588,7 @@ void BlitShowBuffer(int bnbr, int x1, int y1, int mode)
         {
             unsigned char *d = GetTempMainMemory(w * h);
             unsigned char *r = GetTempMainMemory((w * h + 1) >> 1);
-            expandpixel((unsigned char *)spritebuff[bnbr].spritebuffptr, d, w * h, 0);
+            expandpixel((unsigned char *)sb->spritebuffptr, d, w * h, 0);
             if (rotation & 1)
             { // swap left/write
                 for (y = 0; y < h; y++)
@@ -5397,10 +5614,10 @@ void BlitShowBuffer(int bnbr, int x1, int y1, int mode)
         }
         else
         {
-            DrawBufferFast(x1, y1, x1 + w - 1, y1 + h - 1, ((fullmode & 8) == 0 ? 0 : -1), (unsigned char *)spritebuff[bnbr].spritebuffptr);
+            DrawBufferFast(x1, y1, x1 + w - 1, y1 + h - 1, ((fullmode & 8) == 0 ? 0 : -1), (unsigned char *)sb->spritebuffptr);
         }
         if (!(mode & 4))
-            spritebuff[bnbr].active = 1;
+            sb->active = 1;
     }
 }
 int sumlayer(void)
@@ -5412,64 +5629,69 @@ int sumlayer(void)
 }
 void hidesafe(int bnbr)
 {
+    struct spritebuffer *sb = &spritebuff[bnbr]; // Cache pointer for performance
     int found = INT_MAX;
-    int zerolifo=0;
+    int zerolifo = 0;
     int i;
     for (i = LIFOpointer - 1; i >= 0; i--)
     {
         if (LIFO[i] == bnbr)
         {
-            blithide(LIFO[i], 0);
+            blithide(LIFO[i]);
             found = i;
             break;
         }
-        blithide(LIFO[i], 0);
+        blithide(LIFO[i]);
     }
-    if (found==INT_MAX)
+    if (found == INT_MAX)
     {
         for (i = zeroLIFOpointer - 1; i >= 0; i--)
         {
             if (zeroLIFO[i] == bnbr)
             {
-                blithide(zeroLIFO[i], 0);
+                blithide(zeroLIFO[i]);
                 found = -i;
-                zerolifo=1;
+                zerolifo = 1;
                 break;
             }
-            blithide(zeroLIFO[i], 0);
+            blithide(zeroLIFO[i]);
         }
     }
-    if (found!=INT_MAX){
+    if (found != INT_MAX)
+    {
         sprites_in_use--;
-        layer_in_use[spritebuff[bnbr].layer]--;
-        spritebuff[bnbr].x = 10000;
-        spritebuff[bnbr].y = 10000;
-        if (spritebuff[bnbr].layer == 0)
+        layer_in_use[sb->layer]--;
+        sb->x = SPRITE_POS_INACTIVE;
+        sb->y = SPRITE_POS_INACTIVE;
+        if (sb->layer == 0)
             zeroLIFOremove(bnbr);
         else
             LIFOremove(bnbr);
-        spritebuff[bnbr].layer = -1;
-        spritebuff[bnbr].next_x = 10000;
-        spritebuff[bnbr].next_y = 10000;
-        spritebuff[bnbr].lastcollisions = 0;
-        spritebuff[bnbr].edges = 0;
+        sb->layer = -1;
+        sb->next_x = SPRITE_POS_INACTIVE;
+        sb->next_y = SPRITE_POS_INACTIVE;
+        sb->lastcollisions = 0;
+        sb->edges = 0;
         if (zerolifo)
         {
             found = -found;
             for (i = found; i < zeroLIFOpointer; i++)
             {
-                BlitShowBuffer(zeroLIFO[i], spritebuff[zeroLIFO[i]].x, spritebuff[zeroLIFO[i]].y, 0);
+                int idx = zeroLIFO[i];
+                BlitShowBuffer(idx, spritebuff[idx].x, spritebuff[idx].y, 0);
             }
             for (i = 0; i < LIFOpointer; i++)
             {
-                BlitShowBuffer(LIFO[i], spritebuff[LIFO[i]].x, spritebuff[LIFO[i]].y, 0);
+                int idx = LIFO[i];
+                BlitShowBuffer(idx, spritebuff[idx].x, spritebuff[idx].y, 0);
             }
         }
         else
         {
             for (i = found; i < LIFOpointer; i++)
             {
-                BlitShowBuffer(LIFO[i], spritebuff[LIFO[i]].x, spritebuff[LIFO[i]].y, 0);
+                int idx = LIFO[i];
+                BlitShowBuffer(idx, spritebuff[idx].x, spritebuff[idx].y, 0);
             }
         }
     }
@@ -5484,11 +5706,11 @@ void showsafe(int bnbr, int x, int y)
     {
         if (LIFO[i] == bnbr)
         {
-            blithide(LIFO[i], 0);
+            blithide(LIFO[i]);
             found = i;
             break;
         }
-        blithide(LIFO[i], 0);
+        blithide(LIFO[i]);
     }
     if (found==INT_MAX)
     {
@@ -5496,12 +5718,12 @@ void showsafe(int bnbr, int x, int y)
         {
             if (zeroLIFO[i] == bnbr)
             {
-                blithide(zeroLIFO[i], 0);
+                blithide(zeroLIFO[i]);
                 zerolifo = 1;
                 found = -i;
                 break;
             }
-            blithide(zeroLIFO[i], 0);
+            blithide(zeroLIFO[i]);
         }
     }
     BlitShowBuffer(bnbr, x, y, 1);
@@ -5510,25 +5732,27 @@ void showsafe(int bnbr, int x, int y)
         found = -found;
         for (i = found + 1; i < zeroLIFOpointer; i++)
         {
-            BlitShowBuffer(zeroLIFO[i], spritebuff[zeroLIFO[i]].x, spritebuff[zeroLIFO[i]].y, 0);
+            int idx = zeroLIFO[i];
+            BlitShowBuffer(idx, spritebuff[idx].x, spritebuff[idx].y, 0);
         }
         for (i = 0; i < LIFOpointer; i++)
         {
-            BlitShowBuffer(LIFO[i], spritebuff[LIFO[i]].x, spritebuff[LIFO[i]].y, 0);
+            int idx = LIFO[i];
+            BlitShowBuffer(idx, spritebuff[idx].x, spritebuff[idx].y, 0);
         }
     }
-    else if(found!=INT_MAX)
+    else if (found != INT_MAX)
     {
         for (i = found + 1; i < LIFOpointer; i++)
         {
-            BlitShowBuffer(LIFO[i], spritebuff[LIFO[i]].x, spritebuff[LIFO[i]].y, 0);
+            int idx = LIFO[i];
+            BlitShowBuffer(idx, spritebuff[idx].x, spritebuff[idx].y, 0);
         }
     }
 }
 void MIPS16 loadsprite(unsigned char *p)
 {
     int fnbr, width, number, height = 0, newsprite = 1, startsprite = 1, bnbr, lc, i, toggle = 0;
-    ;
     char *q, *fname;
     unsigned char buff[256], *z;
     uint32_t data;
@@ -5573,23 +5797,7 @@ void MIPS16 loadsprite(unsigned char *p)
                     spritebuff[bnbr].spritebuffptr = (char *)GetMemory((width * height + 1) >> 1);
                 if (spritebuff[bnbr].blitstoreptr == NULL)
                     spritebuff[bnbr].blitstoreptr = (char *)GetMemory((width * height + 1) >> 1);
-                spritebuff[bnbr].w = width;
-                spritebuff[bnbr].h = height;
-                spritebuff[bnbr].master = 0;
-                spritebuff[bnbr].mymaster = -1;
-                spritebuff[bnbr].x = 10000;
-                spritebuff[bnbr].y = 10000;
-                spritebuff[bnbr].layer = -1;
-                spritebuff[bnbr].next_x = 10000;
-                spritebuff[bnbr].next_y = 10000;
-                spritebuff[bnbr].active = false;
-                spritebuff[bnbr].lastcollisions = 0;
-                spritebuff[bnbr].edges = 0;
-                spritebuff[bnbr].boundsleft = NULL;
-                spritebuff[bnbr].boundsright = NULL;
-                spritebuff[bnbr].boundstop = NULL;
-                spritebuff[bnbr].boundsbottom = NULL;
-                
+                initSpriteBuff(bnbr, width, height);
                 q = spritebuff[bnbr].spritebuffptr;
                 lc = height;
             }
@@ -5598,88 +5806,16 @@ void MIPS16 loadsprite(unsigned char *p)
                 MMgetline(fnbr, (char *)buff); // get the input line
                 while (buff[0] == 39)
                     MMgetline(fnbr, (char *)buff);
-                if ((int)strlen((char *)buff) < width)
-                    memset(&buff[strlen((char *)buff)], 32, width - strlen((char *)buff));
+                int bufflen = (int)strlen((char *)buff); // Cache strlen result
+                if (bufflen < width)
+                    memset(&buff[bufflen], 32, width - bufflen);
                 for (i = 0; i < width; i++)
                 {
-                    if (mode)
-                    {
-                        if (buff[i] == ' ')
-                            data = 0;
-                        else if (buff[i] == '0')
-                            data = BLACK;
-                        else if (buff[i] == '1')
-                            data = BLUE;
-                        else if (buff[i] == '2')
-                            data = MYRTLE;
-                        else if (buff[i] == '3')
-                            data = COBALT;
-                        else if (buff[i] == '4')
-                            data = MIDGREEN;
-                        else if (buff[i] == '5')
-                            data = CERULEAN;
-                        else if (buff[i] == '6')
-                            data = GREEN;
-                        else if (buff[i] == '7')
-                            data = CYAN;
-                        else if (buff[i] == '8')
-                            data = RED;
-                        else if (buff[i] == '9')
-                            data = MAGENTA;
-                        else if (buff[i] == 'A' || buff[i] == 'a')
-                            data = RUST;
-                        else if (buff[i] == 'B' || buff[i] == 'b')
-                            data = FUCHSIA;
-                        else if (buff[i] == 'C' || buff[i] == 'c')
-                            data = BROWN;
-                        else if (buff[i] == 'D' || buff[i] == 'd')
-                            data = LILAC;
-                        else if (buff[i] == 'E' || buff[i] == 'e')
-                            data = YELLOW;
-                        else if (buff[i] == 'F' || buff[i] == 'f')
-                            data = WHITE;
-                        else
-                            data = 0;
-                    }
+                    int colorIdx = spriteCharToColorIndex(buff[i]);
+                    if (colorIdx >= 0)
+                        data = mode ? sprite_color_mode1[colorIdx] : sprite_color_mode0[colorIdx];
                     else
-                    {
-                        if (buff[i] == ' ')
-                            data = 0;
-                        else if (buff[i] == '0')
-                            data = BLACK;
-                        else if (buff[i] == '1')
-                            data = BLUE;
-                        else if (buff[i] == '2')
-                            data = GREEN;
-                        else if (buff[i] == '3')
-                            data = CYAN;
-                        else if (buff[i] == '4')
-                            data = RED;
-                        else if (buff[i] == '5')
-                            data = MAGENTA;
-                        else if (buff[i] == '6')
-                            data = YELLOW;
-                        else if (buff[i] == '7')
-                            data = WHITE;
-                        else if (buff[i] == '8')
-                            data = MYRTLE;
-                        else if (buff[i] == '9')
-                            data = COBALT;
-                        else if (buff[i] == 'A' || buff[i] == 'a')
-                            data = MIDGREEN;
-                        else if (buff[i] == 'B' || buff[i] == 'b')
-                            data = CERULEAN;
-                        else if (buff[i] == 'C' || buff[i] == 'c')
-                            data = RUST;
-                        else if (buff[i] == 'D' || buff[i] == 'd')
-                            data = FUCHSIA;
-                        else if (buff[i] == 'E' || buff[i] == 'e')
-                            data = BROWN;
-                        else if (buff[i] == 'F' || buff[i] == 'f')
-                            data = LILAC;
-                        else
-                            data = 0;
-                    }
+                        data = 0;
                     if (toggle)
                     {
                         *q++ |= (RGB121(data) << 4);
@@ -5717,28 +5853,12 @@ void MIPS16 loadarray(unsigned char *p)
     {
         w = (int)getint(argv[2], 1, maxW);
         h = (int)getint(argv[4], 1, maxH);
-        size = parsenumberarray(argv[6], &a3float, &a3int, 4, 1, NULL, true) - 1;
+        size = parsenumberarray(argv[6], &a3float, &a3int, 4, 1, NULL, true, NULL) - 1;
         if (size < w * h - 1)
             error((char *)"Array Dimensions");
         spritebuff[bnbr].spritebuffptr = (char *)GetMemory((w * h + 1) >> 1);
         spritebuff[bnbr].blitstoreptr = (char *)GetMemory((w * h + 1) >> 1);
-        spritebuff[bnbr].w = w;
-        spritebuff[bnbr].h = h;
-        spritebuff[bnbr].master = 0;
-        spritebuff[bnbr].mymaster = -1;
-        spritebuff[bnbr].x = 10000;
-        spritebuff[bnbr].y = 10000;
-        spritebuff[bnbr].layer = -1;
-        spritebuff[bnbr].next_x = 10000;
-        spritebuff[bnbr].next_y = 10000;
-        spritebuff[bnbr].active = false;
-        spritebuff[bnbr].lastcollisions = 0;
-        spritebuff[bnbr].edges = 0;
-        spritebuff[bnbr].boundsleft = NULL;
-        spritebuff[bnbr].boundsright = NULL;
-        spritebuff[bnbr].boundstop = NULL;
-        spritebuff[bnbr].boundsbottom = NULL;
-
+        initSpriteBuff(bnbr, w, h);
         q = spritebuff[bnbr].spritebuffptr;
         int c;
         for (i = 0; i < w * h; i++)
@@ -5943,7 +6063,7 @@ void cmd_sprite(void)
         if (*argv[0] == '#')
             argv[0]++;
         bnbr = (int)getint(argv[0], 1, MAXBLITBUF); // get the number
-        if (spritebuff[bnbr].h == 9999)
+        if (spritebuff[bnbr].h == TRIANGLE_BUFFER_MARKER)
             StandardError(37);
         if (spritebuff[bnbr].spritebuffptr != NULL)
         {
@@ -6014,7 +6134,7 @@ void cmd_sprite(void)
         if (*argv[0] == '#')
             argv[0]++;
         bnbr = (int)getint(argv[0], 1, MAXBLITBUF); // get the number
-        if (spritebuff[bnbr].h == 9999)
+        if (spritebuff[bnbr].h == TRIANGLE_BUFFER_MARKER)
             StandardError(37);
         if (spritebuff[bnbr].spritebuffptr != NULL)
         {
@@ -6065,11 +6185,11 @@ void cmd_sprite(void)
         //        int cursorhidden = 0;
         for (i = LIFOpointer - 1; i >= 0; i--)
         {
-            blithide(LIFO[i], 0);
+            blithide(LIFO[i]);
         }
         for (i = zeroLIFOpointer - 1; i >= 0; i--)
         {
-            blithide(zeroLIFO[i], 0);
+            blithide(zeroLIFO[i]);
         }
         hideall = 1;
     }
@@ -6085,15 +6205,15 @@ void cmd_sprite(void)
         }
         for (i = 0; i < LIFOpointer; i++)
         {
-            if (spritebuff[LIFO[i]].next_x != 10000)
+            if (spritebuff[LIFO[i]].next_x != SPRITE_POS_INACTIVE)
             {
                 spritebuff[LIFO[i]].x = spritebuff[LIFO[i]].next_x;
-                spritebuff[LIFO[i]].next_x = 10000;
+                spritebuff[LIFO[i]].next_x = SPRITE_POS_INACTIVE;
             }
-            if (spritebuff[LIFO[i]].next_y != 10000)
+            if (spritebuff[LIFO[i]].next_y != SPRITE_POS_INACTIVE)
             {
                 spritebuff[LIFO[i]].y = spritebuff[LIFO[i]].next_y;
-                spritebuff[LIFO[i]].next_y = 10000;
+                spritebuff[LIFO[i]].next_y = SPRITE_POS_INACTIVE;
             }
             BlitShowBuffer(LIFO[i], spritebuff[LIFO[i]].x, spritebuff[LIFO[i]].y, 0);
         }
@@ -6141,17 +6261,17 @@ void cmd_sprite(void)
             {
                 sprites_in_use--;
                 //                int cursorhidden = 0;
-                blithide(bnbr, 0);
+                blithide(bnbr);
                 layer_in_use[spritebuff[bnbr].layer]--;
-                spritebuff[bnbr].x = 10000;
-                spritebuff[bnbr].y = 10000;
+                spritebuff[bnbr].x = SPRITE_POS_INACTIVE;
+                spritebuff[bnbr].y = SPRITE_POS_INACTIVE;
                 if (spritebuff[bnbr].layer == 0)
                     zeroLIFOremove(bnbr);
                 else
                     LIFOremove(bnbr);
                 spritebuff[bnbr].layer = -1;
-                spritebuff[bnbr].next_x = 10000;
-                spritebuff[bnbr].next_y = 10000;
+                spritebuff[bnbr].next_x = SPRITE_POS_INACTIVE;
+                spritebuff[bnbr].next_y = SPRITE_POS_INACTIVE;
                 spritebuff[bnbr].lastcollisions = 0;
                 spritebuff[bnbr].edges = 0;
             }
@@ -6178,11 +6298,9 @@ void cmd_sprite(void)
             argv[0]++;
         bnbr = (int)getint(argv[0], 1, MAXBLITBUF); // get the number
         if (*argv[2] == '#')
-            argv[0]++;
+            argv[2]++;
         rbnbr = (int)getint(argv[2], 1, MAXBLITBUF); // get the number
         if (spritebuff[bnbr].spritebuffptr == NULL || spritebuff[bnbr].active == false)
-            error((char *)"Original buffer not displayed");
-        if (!spritebuff[bnbr].active)
             error((char *)"Original buffer not displayed");
         //        if (spritebuff[bnbr].master == -1)error((char *)"Can't swap a copy");
         if (spritebuff[rbnbr].active)
@@ -6211,17 +6329,17 @@ void cmd_sprite(void)
         // "Hide" the old sprite
         spritebuff[bnbr].master = master;
         spritebuff[bnbr].mymaster = mymaster;
-        spritebuff[bnbr].x = 10000;
-        spritebuff[bnbr].y = 10000;
+        spritebuff[bnbr].x = SPRITE_POS_INACTIVE;
+        spritebuff[bnbr].y = SPRITE_POS_INACTIVE;
         spritebuff[bnbr].layer = -1;
-        spritebuff[bnbr].next_x = 10000;
-        spritebuff[bnbr].next_y = 10000;
+        spritebuff[bnbr].next_x = SPRITE_POS_INACTIVE;
+        spritebuff[bnbr].next_y = SPRITE_POS_INACTIVE;
         spritebuff[bnbr].active = 0;
         spritebuff[bnbr].lastcollisions = 0;
         if (argc == 5)
             spritebuff[rbnbr].rotation = (int)getint(argv[4], 0, 7);
         else
-            spritebuff[bnbr].rotation = 0;
+            spritebuff[rbnbr].rotation = 0;
         if (spritebuff[rbnbr].rotation > 3)
         {
             mode |= 8;
@@ -6249,22 +6367,7 @@ void cmd_sprite(void)
         {
             spritebuff[bnbr].spritebuffptr = (char *)GetMemory((w * h + 1) >> 1);
             spritebuff[bnbr].blitstoreptr = (char *)GetMemory((w * h + 1) >> 1);
-            spritebuff[bnbr].w = w;
-            spritebuff[bnbr].h = h;
-            spritebuff[bnbr].master = 0;
-            spritebuff[bnbr].mymaster = -1;
-            spritebuff[bnbr].x = 10000;
-            spritebuff[bnbr].y = 10000;
-            spritebuff[bnbr].layer = -1;
-            spritebuff[bnbr].next_x = 10000;
-            spritebuff[bnbr].next_y = 10000;
-            spritebuff[bnbr].active = false;
-            spritebuff[bnbr].lastcollisions = 0;
-            spritebuff[bnbr].edges = 0;
-            spritebuff[bnbr].boundsleft = NULL;
-            spritebuff[bnbr].boundsright = NULL;
-            spritebuff[bnbr].boundstop = NULL;
-            spritebuff[bnbr].boundsbottom = NULL;
+            initSpriteBuff(bnbr, w, h);
         }
         else
         {
@@ -6310,10 +6413,10 @@ void cmd_sprite(void)
                 spritebuff[cpy].w = spritebuff[bnbr].w;
                 spritebuff[cpy].h = spritebuff[bnbr].h;
                 spritebuff[cpy].blitstoreptr = (char *)GetMemory((spritebuff[cpy].w * spritebuff[cpy].h + 1) >> 1);
-                spritebuff[cpy].x = 10000;
-                spritebuff[cpy].y = 10000;
-                spritebuff[cpy].next_x = 10000;
-                spritebuff[cpy].next_y = 10000;
+                spritebuff[cpy].x = SPRITE_POS_INACTIVE;
+                spritebuff[cpy].y = SPRITE_POS_INACTIVE;
+                spritebuff[cpy].next_x = SPRITE_POS_INACTIVE;
+                spritebuff[cpy].next_y = SPRITE_POS_INACTIVE;
                 spritebuff[cpy].layer = -1;
                 spritebuff[cpy].mymaster = bnbr;
                 spritebuff[cpy].master = -1;
@@ -6341,6 +6444,51 @@ void cmd_sprite(void)
         loadsprite(p);
         return;
     }
+    else if ((p = checkstring(cmdline, (unsigned char *)"STATIC CLEAR")))
+    {
+        closeallstobjects();
+        return;
+    }
+    else if ((p = checkstring(cmdline, (unsigned char *)"STATIC")))
+    {
+        getcsargs(&p, 9);
+        if (*argv[0] == '#')
+            argv[0]++;
+        int stnum = (int)getint(argv[0], 1, MAXSTOBJECTS);
+        if (argc == 3 && checkstring(argv[2], (unsigned char *)"OFF"))
+        {
+            // SPRITE STATIC n, OFF - remove static object
+            stobjects[stnum].active = 0;
+            stobjects[stnum].x = 0;
+            stobjects[stnum].y = 0;
+            stobjects[stnum].w = 0;
+            stobjects[stnum].h = 0;
+        }
+        else if (argc == 9)
+        {
+            // SPRITE STATIC n, x, y, w, h - define static object
+            stobjects[stnum].x = (short)getint(argv[2], -32768, 32767);
+            stobjects[stnum].y = (short)getint(argv[4], -32768, 32767);
+            stobjects[stnum].w = (short)getint(argv[6], 1, 32767);
+            stobjects[stnum].h = (short)getint(argv[8], 1, 32767);
+            stobjects[stnum].active = 1;
+        }
+        else
+            SyntaxError();
+        return;
+    }
+    else if ((p = checkstring(cmdline, (unsigned char *)"STINTERRUPT")))
+    {
+        getcsargs(&p, 1);
+        STCollisionInterrupt = (char *)GetIntAddress(argv[0]); // get the interrupt location
+        InterruptUsed = true;
+        return;
+    }
+    else if ((p = checkstring(cmdline, (unsigned char *)"NOSTINTERRUPT")))
+    {
+        STCollisionInterrupt = NULL;
+        return;
+    }
     else if ((p = checkstring(cmdline, (unsigned char *)"INTERRUPT")))
     {
         getcsargs(&p, 1);
@@ -6356,6 +6504,7 @@ void cmd_sprite(void)
     else if ((p = checkstring(cmdline, (unsigned char *)"CLOSE ALL")))
     {
         closeallsprites();
+        closeallstobjects();
     }
     else if ((p = checkstring(cmdline, (unsigned char *)"CLOSE")))
     {
@@ -6371,7 +6520,7 @@ void cmd_sprite(void)
         {
             if (spritebuff[bnbr].active)
             {
-                blithide(bnbr, 1);
+                blithide(bnbr);
                 if (spritebuff[bnbr].layer == 0)
                     zeroLIFOremove(bnbr);
                 else
@@ -6379,7 +6528,7 @@ void cmd_sprite(void)
                 layer_in_use[spritebuff[bnbr].layer]--;
                 sprites_in_use--;
             }
-            if (spritebuff[bnbr].mymaster == -1){
+            if (spritebuff[bnbr].mymaster == -1)
                 FreeMemorySafe((void **)&spritebuff[bnbr].spritebuffptr);
                 FreeMemory((unsigned char *)spritebuff[bnbr].boundsleft);
                 FreeMemory((unsigned char *)spritebuff[bnbr].boundsright);
@@ -6393,12 +6542,12 @@ void cmd_sprite(void)
             spritebuff[bnbr].blitstoreptr = NULL;
             spritebuff[bnbr].master = -1;
             spritebuff[bnbr].mymaster = -1;
-            spritebuff[bnbr].x = 10000;
-            spritebuff[bnbr].y = 10000;
+            spritebuff[bnbr].x = SPRITE_POS_INACTIVE;
+            spritebuff[bnbr].y = SPRITE_POS_INACTIVE;
             spritebuff[bnbr].w = 0;
             spritebuff[bnbr].h = 0;
-            spritebuff[bnbr].next_x = 10000;
-            spritebuff[bnbr].next_y = 10000;
+            spritebuff[bnbr].next_x = SPRITE_POS_INACTIVE;
+            spritebuff[bnbr].next_y = SPRITE_POS_INACTIVE;
             spritebuff[bnbr].layer = -1;
             spritebuff[bnbr].active = false;
             spritebuff[bnbr].edges = 0;
@@ -6433,7 +6582,7 @@ void cmd_sprite(void)
         if (*argv[0] == '#')
             argv[0]++;
         bnbr = (int)getint(argv[0], 1, MAXBLITBUF); // get the number
-        if (spritebuff[bnbr].h == 9999)
+        if (spritebuff[bnbr].h == TRIANGLE_BUFFER_MARKER)
             StandardError(37);
         if (spritebuff[bnbr].spritebuffptr != NULL)
         {
@@ -6486,22 +6635,7 @@ void cmd_sprite(void)
         h = upng_get_height(upng);
         spritebuff[bnbr].spritebuffptr = GetMemory((w * h + 4) >> 1);
         spritebuff[bnbr].blitstoreptr = GetMemory((w * h + 4) >> 1);
-        spritebuff[bnbr].w = w;
-        spritebuff[bnbr].h = h;
-        spritebuff[bnbr].master = 0;
-        spritebuff[bnbr].mymaster = -1;
-        spritebuff[bnbr].x = 10000;
-        spritebuff[bnbr].y = 10000;
-        spritebuff[bnbr].layer = -1;
-        spritebuff[bnbr].next_x = 10000;
-        spritebuff[bnbr].next_y = 10000;
-        spritebuff[bnbr].active = false;
-        spritebuff[bnbr].lastcollisions = 0;
-        spritebuff[bnbr].edges = 0;
-        spritebuff[bnbr].boundsleft = NULL;
-        spritebuff[bnbr].boundsright = NULL;
-        spritebuff[bnbr].boundstop = NULL;
-        spritebuff[bnbr].boundsbottom = NULL;                
+        initSpriteBuff(bnbr, w, h);
         unsigned char *t = (unsigned char *)spritebuff[bnbr].spritebuffptr;
         if (w > HRes || h > VRes)
         {
@@ -6622,22 +6756,7 @@ void cmd_sprite(void)
         linecallback = loadBMPlinecallback;
         decodeBMP(0);
         FileClose(BMPfnbr);
-        spritebuff[bnbr].w = state.width;
-        spritebuff[bnbr].h = state.height;
-        spritebuff[bnbr].master = 0;
-        spritebuff[bnbr].mymaster = -1;
-        spritebuff[bnbr].x = 10000;
-        spritebuff[bnbr].y = 10000;
-        spritebuff[bnbr].layer = -1;
-        spritebuff[bnbr].next_x = 10000;
-        spritebuff[bnbr].next_y = 10000;
-        spritebuff[bnbr].active = false;
-        spritebuff[bnbr].lastcollisions = 0;
-        spritebuff[bnbr].edges = 0;
-        spritebuff[bnbr].boundsleft = NULL;
-        spritebuff[bnbr].boundsright = NULL;
-        spritebuff[bnbr].boundstop = NULL;
-        spritebuff[bnbr].boundsbottom = NULL;    
+        initSpriteBuff(bnbr, state.width, state.height);
         char *t = spritebuff[bnbr].spritebuffptr;
         int i = state.width * state.height;
         unsigned char *q = state.output_buffer;
@@ -6680,35 +6799,35 @@ void cmd_sprite(void)
         int i;
         //        int cursorhidden = 0;
         for (i = LIFOpointer - 1; i >= 0; i--)
-            blithide(LIFO[i], 0);
+            blithide(LIFO[i]);
         for (i = zeroLIFOpointer - 1; i >= 0; i--)
-            blithide(zeroLIFO[i], 0);
+            blithide(zeroLIFO[i]);
         //
         for (i = 0; i < zeroLIFOpointer; i++)
         {
-            if (spritebuff[zeroLIFO[i]].next_x != 10000)
+            if (spritebuff[zeroLIFO[i]].next_x != SPRITE_POS_INACTIVE)
             {
                 spritebuff[zeroLIFO[i]].x = spritebuff[zeroLIFO[i]].next_x;
-                spritebuff[zeroLIFO[i]].next_x = 10000;
+                spritebuff[zeroLIFO[i]].next_x = SPRITE_POS_INACTIVE;
             }
-            if (spritebuff[zeroLIFO[i]].next_y != 10000)
+            if (spritebuff[zeroLIFO[i]].next_y != SPRITE_POS_INACTIVE)
             {
                 spritebuff[zeroLIFO[i]].y = spritebuff[zeroLIFO[i]].next_y;
-                spritebuff[zeroLIFO[i]].next_y = 10000;
+                spritebuff[zeroLIFO[i]].next_y = SPRITE_POS_INACTIVE;
             }
             BlitShowBuffer(zeroLIFO[i], spritebuff[zeroLIFO[i]].x, spritebuff[zeroLIFO[i]].y, 0);
         }
         for (i = 0; i < LIFOpointer; i++)
         {
-            if (spritebuff[LIFO[i]].next_x != 10000)
+            if (spritebuff[LIFO[i]].next_x != SPRITE_POS_INACTIVE)
             {
                 spritebuff[LIFO[i]].x = spritebuff[LIFO[i]].next_x;
-                spritebuff[LIFO[i]].next_x = 10000;
+                spritebuff[LIFO[i]].next_x = SPRITE_POS_INACTIVE;
             }
-            if (spritebuff[LIFO[i]].next_y != 10000)
+            if (spritebuff[LIFO[i]].next_y != SPRITE_POS_INACTIVE)
             {
                 spritebuff[LIFO[i]].y = spritebuff[LIFO[i]].next_y;
-                spritebuff[LIFO[i]].next_y = 10000;
+                spritebuff[LIFO[i]].next_y = SPRITE_POS_INACTIVE;
             }
             BlitShowBuffer(LIFO[i], spritebuff[LIFO[i]].x, spritebuff[LIFO[i]].y, 0);
         }
@@ -6724,7 +6843,7 @@ void cmd_sprite(void)
         x = (int)getint(argv[0], -maxW / 2 - 1, maxW);
         y = (int)getint(argv[2], -maxH / 2 - 1, maxH);
         if (argc == 5)
-            blank = (int)getColour((char *)argv[2], 1);
+            blank = (int)getColour((char *)argv[4], 1);
         if (!(x == 0 && y == 0))
         {
             m = ((maxW * (y > 0 ? y : -y) + 1) >> 1);
@@ -6734,12 +6853,12 @@ void cmd_sprite(void)
             if (blank == -2)
                 current = (char *)GetMemory(m);
             for (i = LIFOpointer - 1; i >= 0; i--)
-                blithide(LIFO[i], 0);
+                blithide(LIFO[i]);
             for (i = zeroLIFOpointer - 1; i >= 0; i--)
             {
                 int xs = spritebuff[zeroLIFO[i]].x + (spritebuff[zeroLIFO[i]].w >> 1);
                 int ys = spritebuff[zeroLIFO[i]].y + (spritebuff[zeroLIFO[i]].h >> 1);
-                blithide(zeroLIFO[i], 0);
+                blithide(zeroLIFO[i]);
                 xs += x;
                 if (xs >= maxW)
                     xs -= maxW;
@@ -6752,6 +6871,27 @@ void cmd_sprite(void)
                 if (ys < 0)
                     ys += maxH;
                 spritebuff[zeroLIFO[i]].y = ys - (spritebuff[zeroLIFO[i]].h >> 1);
+            }
+            // Scroll static objects with the background
+            for (i = 1; i <= MAXSTOBJECTS; i++)
+            {
+                if (stobjects[i].active)
+                {
+                    int bx = stobjects[i].x + (stobjects[i].w >> 1);
+                    int by = stobjects[i].y + (stobjects[i].h >> 1);
+                    bx += x;
+                    if (bx >= maxW)
+                        bx -= maxW;
+                    if (bx < 0)
+                        bx += maxW;
+                    stobjects[i].x = bx - (stobjects[i].w >> 1);
+                    by -= y;
+                    if (by >= maxH)
+                        by -= maxH;
+                    if (by < 0)
+                        by += maxH;
+                    stobjects[i].y = by - (stobjects[i].h >> 1);
+                }
             }
             if (x > 0)
             {
@@ -6801,15 +6941,15 @@ void cmd_sprite(void)
             }
             for (i = 0; i < LIFOpointer; i++)
             {
-                if (spritebuff[LIFO[i]].next_x != 10000)
+                if (spritebuff[LIFO[i]].next_x != SPRITE_POS_INACTIVE)
                 {
                     spritebuff[LIFO[i]].x = spritebuff[LIFO[i]].next_x;
-                    spritebuff[LIFO[i]].next_x = 10000;
+                    spritebuff[LIFO[i]].next_x = SPRITE_POS_INACTIVE;
                 }
-                if (spritebuff[LIFO[i]].next_y != 10000)
+                if (spritebuff[LIFO[i]].next_y != SPRITE_POS_INACTIVE)
                 {
                     spritebuff[LIFO[i]].y = spritebuff[LIFO[i]].next_y;
-                    spritebuff[LIFO[i]].next_y = 10000;
+                    spritebuff[LIFO[i]].next_y = SPRITE_POS_INACTIVE;
                 }
 
                 BlitShowBuffer(LIFO[i], spritebuff[LIFO[i]].x, spritebuff[LIFO[i]].y, 0);
@@ -6825,12 +6965,54 @@ void cmd_sprite(void)
     }
     else
         SyntaxError();
-    ;
 }
 void fun_sprite(void)
 {
-    int bnbr = 0, w = -1, h = -1, t = 0, x = 10000, y = 10000, l = 0, n, c = 0;
+    int bnbr = 0, w = -1, h = -1, t = 0, x = SPRITE_POS_INACTIVE, y = SPRITE_POS_INACTIVE, l = 0, n, c = 0;
     getcsargs(&ep, 5);
+    // Static object queries
+    if (checkstring(argv[0], (unsigned char *)"ST"))
+    {
+        if (argc < 3)
+            SyntaxError();
+        if (checkstring(argv[2], (unsigned char *)"COLLISION"))
+        {
+            // SPRITE(ST, COLLISION) - which sprite hit a static object
+            iret = sprite_hit_st;
+            targ = T_INT;
+            return;
+        }
+        else if (checkstring(argv[2], (unsigned char *)"OBJECT"))
+        {
+            // SPRITE(ST, OBJECT) - which static object was hit
+            iret = st_which_collided;
+            targ = T_INT;
+            return;
+        }
+        else
+        {
+            // SPRITE(ST, n, property) - get static object properties
+            if (argc < 5)
+                SyntaxError();
+            if (*argv[2] == '#')
+                argv[2]++;
+            int stnum = (int)getint(argv[2], 1, MAXSTOBJECTS);
+            if (checkstring(argv[4], (unsigned char *)"X"))
+                iret = stobjects[stnum].active ? stobjects[stnum].x : -1;
+            else if (checkstring(argv[4], (unsigned char *)"Y"))
+                iret = stobjects[stnum].active ? stobjects[stnum].y : -1;
+            else if (checkstring(argv[4], (unsigned char *)"W"))
+                iret = stobjects[stnum].active ? stobjects[stnum].w : -1;
+            else if (checkstring(argv[4], (unsigned char *)"H"))
+                iret = stobjects[stnum].active ? stobjects[stnum].h : -1;
+            else if (checkstring(argv[4], (unsigned char *)"A"))
+                iret = stobjects[stnum].active;
+            else
+                SyntaxError();
+            targ = T_INT;
+            return;
+        }
+    }
     if (checkstring(argv[0], (unsigned char *)"W"))
         t = 1;
     else if (checkstring(argv[0], (unsigned char *)"H"))
@@ -6906,14 +7088,14 @@ void fun_sprite(void)
         if (spritebuff[bnbr].active)
             iret = x;
         else
-            iret = 10000;
+            iret = SPRITE_POS_INACTIVE;
     }
     else if (t == 4)
     {
         if (spritebuff[bnbr].active)
             iret = y;
         else
-            iret = 10000;
+            iret = SPRITE_POS_INACTIVE;
     }
     else if (t == 5)
     {
@@ -7222,6 +7404,11 @@ void fun_sprite(void)
 #ifndef PICOMITEVGA
 void restorepanel(void)
 {
+    if (Option.DISPLAY_TYPE >= VIRTUAL && Option.DISPLAY_TYPE <= VIRTUAL_M)
+    {
+        InitDisplayVirtual();
+        return;
+    }
     if (Option.DISPLAY_TYPE > I2C_PANEL && Option.DISPLAY_TYPE < BufferedPanel)
     {
         if (Option.DISPLAY_ORIENTATION == PORTRAIT)
@@ -8002,7 +8189,7 @@ void merge(uint8_t colour)
     uint8_t BatchBuf[MERGE_BATCH_LINES * (HRes / 2)];
 
 #ifdef PICOMITE
-//    mutex_enter_blocking(&frameBufferMutex);
+    mutex_enter_blocking(&frameBufferMutex);
 #endif
 
     if (Option.DISPLAY_TYPE == ILI9341 || Option.DISPLAY_TYPE == ST7796SP ||
@@ -8648,7 +8835,7 @@ void cmd_blit(void)
         if (*argv[0] == '#')
             argv[0]++;
         bnbr = (int)getint(argv[0], 1, MAXBLITBUF) - 1; // get the number
-        if (blitbuff[bnbr].h == 9999)
+        if (blitbuff[bnbr].h == TRIANGLE_BUFFER_MARKER)
             StandardError(37);
         if (blitbuff[bnbr].blitbuffptr != NULL)
         {
@@ -9249,7 +9436,6 @@ void MIPS16 cmd_font(void)
         }
     }
 }
-#ifdef PICOMITEVGA
 void cmd_colourmap(void)
 {
     long long int *cptr = NULL, *fptr = NULL;
@@ -9260,12 +9446,12 @@ void cmd_colourmap(void)
     memcpy((void *)map, (void *)RGB121map, 16 * sizeof(int));
     if (!(argc == 3 || argc == 5))
         StandardError(2);
-    n = parsenumberarray(argv[0], &cfptr, &cptr, 1, 1, NULL, true);
+    n = parsenumberarray(argv[0], &cfptr, &cptr, 1, 1, NULL, true, NULL);
     if (argc == 5)
     { // user defined mapping
         MMFLOAT *a3float = NULL;
         int64_t *a3int = NULL;
-        if (parsenumberarray(argv[4], &a3float, &a3int, 3, 1, NULL, true) != 16)
+        if (parsenumberarray(argv[4], &a3float, &a3int, 3, 1, NULL, true, NULL) != 16)
             error("Array size not 16 elements");
         if (a3int != NULL)
         {
@@ -9286,7 +9472,7 @@ void cmd_colourmap(void)
             }
         }
     }
-    nf = parsenumberarray(argv[2], &ffptr, &fptr, 1, 1, NULL, false);
+    nf = parsenumberarray(argv[2], &ffptr, &fptr, 1, 1, NULL, false, NULL);
     if (nf != n)
         error("Array size mismatch %, %", n, nf);
     for (int i = 0; i < n; i++)
@@ -9300,7 +9486,7 @@ void cmd_colourmap(void)
             fptr[i] = map[in];
     }
 }
-#endif
+
 void cmd_colour(void)
 {
     getcsargs(&cmdline, 3);
@@ -10442,10 +10628,10 @@ void DrawPixel2(int x, int y, int c)
         return;
 #if PICOMITERP2350
     if ((Option.DISPLAY_TYPE >= VIRTUAL && Option.DISPLAY_TYPE < VGA222) && WriteBuf == NULL)
-        WriteBuf = GetMemory(VMaxH * VMaxV / 8);
+        WriteBuf = FRAMEBUFFER;
 #else
     if ((Option.DISPLAY_TYPE >= VIRTUAL) && WriteBuf == NULL)
-        WriteBuf = GetMemory(VMaxH * VMaxV / 8);
+        WriteBuf = FRAMEBUFFER;
 #endif
     uint8_t *p = (uint8_t *)(((uint32_t)WriteBuf) + (y * (HRes >> 3)) + (x >> 3));
     uint8_t bit = 1 << (x % 8);
@@ -10461,10 +10647,10 @@ void DrawRectangle2(int x1, int y1, int x2, int y2, int c)
     volatile unsigned char *p;
 #if PICOMITERP2350
     if ((Option.DISPLAY_TYPE >= VIRTUAL && Option.DISPLAY_TYPE < VGA222) && WriteBuf == NULL)
-        WriteBuf = GetMemory(VMaxH * VMaxV / 8);
+        WriteBuf = FRAMEBUFFER;
 #else
     if ((Option.DISPLAY_TYPE >= VIRTUAL) && WriteBuf == NULL)
-        WriteBuf = GetMemory(VMaxH * VMaxV / 8);
+        WriteBuf = FRAMEBUFFER;
 #endif
     if (x1 < 0)
         x1 = 0;
@@ -10587,10 +10773,10 @@ void DrawBitmap2(int x1, int y1, int width, int height, int scale, int fc, int b
     int tilematch = 0;
 #if PICOMITERP2350
     if ((Option.DISPLAY_TYPE >= VIRTUAL && Option.DISPLAY_TYPE < VGA222) && WriteBuf == NULL)
-        WriteBuf = GetMemory(VMaxH * VMaxV / 8);
+        WriteBuf = FRAMEBUFFER;
 #else
     if ((Option.DISPLAY_TYPE >= VIRTUAL) && WriteBuf == NULL)
-        WriteBuf = GetMemory(VMaxH * VMaxV / 8);
+        WriteBuf = FRAMEBUFFER;
 #endif
 #ifdef PICOMITEVGA
     int xa = 8;
@@ -10871,10 +11057,10 @@ void DrawBuffer2(int x1, int y1, int x2, int y2, unsigned char *p)
     } c;
 #if PICOMITERP2350
     if ((Option.DISPLAY_TYPE >= VIRTUAL && Option.DISPLAY_TYPE < VGA222) && WriteBuf == NULL)
-        WriteBuf = GetMemory(VMaxH * VMaxV / 8);
+        WriteBuf = FRAMEBUFFER;
 #else
     if ((Option.DISPLAY_TYPE >= VIRTUAL) && WriteBuf == NULL)
-        WriteBuf = GetMemory(VMaxH * VMaxV / 8);
+        WriteBuf = FRAMEBUFFER;
 #endif
     // make sure the coordinates are kept within the display area
     if (x2 <= x1)
@@ -10951,10 +11137,10 @@ void DrawBuffer2Fast(int x1, int y1, int x2, int y2, int blank, unsigned char *p
     }
 #if PICOMITERP2350
     if ((Option.DISPLAY_TYPE >= VIRTUAL && Option.DISPLAY_TYPE < VGA222) && WriteBuf == NULL)
-        WriteBuf = GetMemory(VMaxH * VMaxV / 8);
+        WriteBuf = FRAMEBUFFER;
 #else
     if ((Option.DISPLAY_TYPE >= VIRTUAL) && WriteBuf == NULL)
-        WriteBuf = GetMemory(VMaxH * VMaxV / 8);
+        WriteBuf = FRAMEBUFFER;
 #endif
     for (y = y1; y <= y2; y++)
     {
@@ -11020,10 +11206,10 @@ void ReadBuffer2(int x1, int y1, int x2, int y2, unsigned char *c)
     unsigned char mask;
 #if PICOMITERP2350
     if ((Option.DISPLAY_TYPE >= VIRTUAL && Option.DISPLAY_TYPE < VGA222) && WriteBuf == NULL)
-        WriteBuf = GetMemory(VMaxH * VMaxV / 8);
+        WriteBuf = FRAMEBUFFER;
 #else
     if ((Option.DISPLAY_TYPE >= VIRTUAL) && WriteBuf == NULL)
-        WriteBuf = GetMemory(VMaxH * VMaxV / 8);
+        WriteBuf = FRAMEBUFFER;
 #endif
     if (x2 <= x1)
     {
@@ -11104,10 +11290,10 @@ void ReadBuffer2Fast(int x1, int y1, int x2, int y2, unsigned char *c)
     unsigned char mask;
 #if PICOMITERP2350
     if ((Option.DISPLAY_TYPE >= VIRTUAL && Option.DISPLAY_TYPE < VGA222) && WriteBuf == NULL)
-        WriteBuf = GetMemory(VMaxH * VMaxV / 8);
+        WriteBuf = FRAMEBUFFER;
 #else
     if ((Option.DISPLAY_TYPE >= VIRTUAL) && WriteBuf == NULL)
-        WriteBuf = GetMemory(VMaxH * VMaxV / 8);
+        WriteBuf = FRAMEBUFFER;
 #endif
     if (x2 <= x1)
     {
@@ -11214,8 +11400,7 @@ void MIPS16 InitDisplayVirtual(void)
         ReadBufferFast = ReadBuffer16Fast;
         DrawPixel = DrawPixel16;
     }
-    if (WriteBuf == NULL)
-        WriteBuf = GetMemory(VMaxH * VMaxV / 8);
+    WriteBuf = FRAMEBUFFER;
 }
 
 /*  @endcond */
@@ -12049,7 +12234,7 @@ void display3d(int n, FLOAT3D x, FLOAT3D y, FLOAT3D z, int clear, int nonormals,
     struct3d[n]->ymin = 32767;
     struct3d[n]->xmax = -32767;
     struct3d[n]->ymax = -32767;
-    short xcoord[MAX_POLYGON_VERTICES], ycoord[MAX_POLYGON_VERTICES];
+    short xcoord[MAX_3D_POLYGON_VERTICES], ycoord[MAX_3D_POLYGON_VERTICES];
     struct3d[n]->distance = 0.0;
     for (f = 0; f < struct3d[n]->nf; f++)
     {
@@ -12305,25 +12490,25 @@ void MIPS16 cmd_3D(void)
         if (nf < 1)
             error("3D object must have a minimum of 1 face");
         int cam = getint(argv[6], 1, MAXCAM);
-        if (parsefloatarray(argv[8], &vertex, 5, 2, NULL, false) < nv)
+        if (parsefloatarray(argv[8], &vertex, 5, 2, NULL, false, NULL) < nv)
             error("Vertex array too small");
-        if (parseintegerarray(argv[10], &facecount, 6, 1, NULL, false) < nf)
+        if (parseintegerarray(argv[10], &facecount, 6, 1, NULL, false, NULL) < nf)
             error("Vertex count array too small");
         facecountindex = facecount;
         for (f = 0; f < nf; f++)
             fc += (*facecountindex++);
-        if (parseintegerarray(argv[12], &faces, 7, 1, NULL, false) < fc)
+        if (parseintegerarray(argv[12], &faces, 7, 1, NULL, false, NULL) < fc)
             error("Face/vertex array too small");
-        colourcount = parseintegerarray(argv[14], &colours, 8, 1, NULL, false);
+        colourcount = parseintegerarray(argv[14], &colours, 8, 1, NULL, false, NULL);
         if (argc >= 17 && *argv[16])
         {
-            if (parseintegerarray(argv[16], &linecolour, 9, 1, NULL, false) < nf)
+            if (parseintegerarray(argv[16], &linecolour, 9, 1, NULL, false, NULL) < nf)
                 error("Line colour  array too small");
         }
 
         if (argc == 19)
         {
-            if (parseintegerarray(argv[18], &fillcolour, 10, 1, NULL, false) < nf)
+            if (parseintegerarray(argv[18], &fillcolour, 10, 1, NULL, false, NULL) < nf)
                 error("Fill colour array too small");
         }
         // The data look valid so now create the object in memory
@@ -12562,7 +12747,7 @@ void MIPS16 cmd_3D(void)
         getcsargs(&p, (MAX_ARG_COUNT * 2) - 1); // macro must be the first executable stmt in a block
         if ((argc & 0x01 || argc < 3) == 0)
             StandardError(2);
-        if (parsefloatarray(argv[0], &q, 1, 1, NULL, true) != 5)
+        if (parsefloatarray(argv[0], &q, 1, 1, NULL, true, NULL) != 5)
             StandardErrorParam(41, 1);
         q1.w = (FLOAT3D)(*q++);
         q1.x = (FLOAT3D)(*q++);

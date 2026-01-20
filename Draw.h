@@ -262,7 +262,18 @@ struct spritebuffer
     short *boundstop;
     short *boundsbottom;
 };
-
+/* ============================================================================
+ * Type definitions - Static object for collision detection
+ * ============================================================================ */
+#define MAXSTOBJECTS 64
+struct stobject
+{
+    short x;     // X position
+    short y;     // Y position
+    short w;     // Width
+    short h;     // Height
+    char active; // Whether this object is defined
+};
 /* ============================================================================
  * Type definitions - Blit buffer
  * ============================================================================ */
@@ -309,12 +320,17 @@ extern s_camera camera[MAXCAM + 1];
  * ============================================================================ */
 extern struct spritebuffer spritebuff[MAXBLITBUF + 1];
 extern struct blitbuffer blitbuff[MAXBLITBUF + 1];
+extern struct stobject stobjects[MAXSTOBJECTS + 1];
 
 /* ============================================================================
  * External variables - Collision detection
  * ============================================================================ */
 extern char *COLLISIONInterrupt;
 extern bool CollisionFound;
+extern char *STCollisionInterrupt;
+extern bool STCollisionFound;
+extern int sprite_hit_st;
+extern int st_which_collided;
 
 /* ============================================================================
  * External variables - Transparency and color mapping
@@ -415,6 +431,7 @@ void closeall3d(void);
  * Function declarations - Sprite operations
  * ============================================================================ */
 void closeallsprites(void);
+void closeallstobjects(void);
 void closeframebuffer(char layer);
 
 /* ============================================================================
