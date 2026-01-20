@@ -4995,7 +4995,7 @@ void getspritebounds(int bnbr)
             }else{//even x lower nipple
                 if((*c & 0x0f) == sprite_transparent) continue;
             }
-            if(spritebuff[bnbr].boundsleft[y] == -1)
+            if(spritebuff[bnbr].boundsleft[y] == w)
               spritebuff[bnbr].boundsleft[y] = x;
             spritebuff[bnbr].boundsright[y] = x;
             spritebuff[bnbr].boundsbottom[x] = y;
@@ -7048,9 +7048,9 @@ void fun_sprite(void)
                 spritebuff[bnbr].backgroundcollision[2]=-1;//top
                 spritebuff[bnbr].backgroundcollision[3]=SHRT_MAX;//bottom
                 spritebuff[bnbr].backgroundcollision[4]=-1;//left
-                spritebuff[bnbr].backgroundcollision[5]=SHRT_MAX;//right
+                spritebuff[bnbr].backgroundcollision[5]=-1;//right
                 spritebuff[bnbr].backgroundcollision[6]=-1;//top
-                spritebuff[bnbr].backgroundcollision[7]=SHRT_MAX;//bottom
+                spritebuff[bnbr].backgroundcollision[7]=-1;//bottom
           
                 char *c=spritebuff[bnbr].blitstoreptr;
                 if (!c) error((char *)"Buffers are empty");
@@ -7078,20 +7078,28 @@ void fun_sprite(void)
                         }
                         if(iret==0) iret=1;
                         if(x>=spritebuff[bnbr].boundsleft[y]){
-                            spritebuff[bnbr].backgroundcollision[4]=x-spritebuff[bnbr].boundsleft[y];
-                            iret=2;
+                            if(x-spritebuff[bnbr].boundsleft[y]> spritebuff[bnbr].backgroundcollision[4]){
+                                spritebuff[bnbr].backgroundcollision[4]=x-spritebuff[bnbr].boundsleft[y];
+                                iret=2;
+                            }
                         }
-                        if( spritebuff[bnbr].backgroundcollision[5]==SHRT_MAX && x<=spritebuff[bnbr].boundsright[y]){
-                            spritebuff[bnbr].backgroundcollision[5]=spritebuff[bnbr].boundsright[y]-x;
-                            iret=2;
+                        if(x<=spritebuff[bnbr].boundsright[y]){
+                            if(spritebuff[bnbr].boundsright[y]-x >  spritebuff[bnbr].backgroundcollision[5]){
+                                spritebuff[bnbr].backgroundcollision[5]=spritebuff[bnbr].boundsright[y]-x;
+                                iret=2;
+                            }
                         }
                         if(y>=spritebuff[bnbr].boundstop[x]){
-                            spritebuff[bnbr].backgroundcollision[6]=y-spritebuff[bnbr].boundstop[x];
-                            iret=2;
+                            if(y-spritebuff[bnbr].boundstop[x]> spritebuff[bnbr].backgroundcollision[6]){
+                                spritebuff[bnbr].backgroundcollision[6]=y-spritebuff[bnbr].boundstop[x];
+                                iret=2;
+                            }
                         }
-                        if( spritebuff[bnbr].backgroundcollision[7]==SHRT_MAX && y<=spritebuff[bnbr].boundsbottom[x]){
-                            spritebuff[bnbr].backgroundcollision[7]=spritebuff[bnbr].boundsbottom[x]-y;
-                            iret=2;
+                        if( y<=spritebuff[bnbr].boundsbottom[x]){
+                            if(spritebuff[bnbr].boundsbottom[x]-y> spritebuff[bnbr].backgroundcollision[7]){    
+                                spritebuff[bnbr].backgroundcollision[7]=spritebuff[bnbr].boundsbottom[x]-y;
+                                iret=2;
+                            }
                         }
                     }
                 }    
@@ -7156,7 +7164,7 @@ void fun_sprite(void)
                 else 
                     spritebuff[bnbr].backgroundcollision[4]++;
             
-                if(spritebuff[bnbr].backgroundcollision[5]==SHRT_MAX)//right
+                if(spritebuff[bnbr].backgroundcollision[5]==-1)//right
                     spritebuff[bnbr].backgroundcollision[5]=0;
                 else 
                     spritebuff[bnbr].backgroundcollision[5]++;
@@ -7166,7 +7174,7 @@ void fun_sprite(void)
                 else 
                     spritebuff[bnbr].backgroundcollision[6]++;
               
-                if(spritebuff[bnbr].backgroundcollision[7]==SHRT_MAX)//bottom
+                if(spritebuff[bnbr].backgroundcollision[7]==-1)//bottom
                     spritebuff[bnbr].backgroundcollision[7]=0;
                 else 
                     spritebuff[bnbr].backgroundcollision[7]++;       
