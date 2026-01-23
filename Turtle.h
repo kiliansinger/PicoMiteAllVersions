@@ -165,6 +165,7 @@ typedef struct
 
 } TurtleState;
 void turtle_init(bool nowrite);
+void turtle_free(void);
 // Core movement functions
 void turtle_forward(TurtleState *t, float distance);
 void turtle_goto(TurtleState *t, float new_x, float new_y);

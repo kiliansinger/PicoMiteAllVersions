@@ -34,6 +34,7 @@ OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
  */
 #include "Hardware_Includes.h"
 #include "hardware/watchdog.h"
+#include "hardware/i2c.h"
 #include "pico/stdlib.h"
 #include "hardware/clocks.h"
 #include "hardware/pwm.h"
@@ -2444,19 +2445,30 @@ void cmd_ir(void)
         if (argc % 2 == 0 || argc == 0)
             SyntaxError();
         IrVarType = 0;
+        int ir_vtype;
         IrDev = findvar(argv[0], V_FIND);
         if (g_vartbl[g_VarIndex].type & T_CONST)
             StandardError(22);
-        if (g_vartbl[g_VarIndex].type & T_STR)
+        ir_vtype = g_vartbl[g_VarIndex].type;
+#ifdef STRUCTENABLED
+        if (g_StructMemberType != 0)
+            ir_vtype = g_StructMemberType;
+#endif
+        if (ir_vtype & T_STR)
             StandardError(6);
-        if (g_vartbl[g_VarIndex].type & T_NBR)
+        if (ir_vtype & T_NBR)
             IrVarType |= 0b01;
         IrCmd = findvar(argv[2], V_FIND);
         if (g_vartbl[g_VarIndex].type & T_CONST)
             StandardError(22);
-        if (g_vartbl[g_VarIndex].type & T_STR)
+        ir_vtype = g_vartbl[g_VarIndex].type;
+#ifdef STRUCTENABLED
+        if (g_StructMemberType != 0)
+            ir_vtype = g_StructMemberType;
+#endif
+        if (ir_vtype & T_STR)
             StandardError(6);
-        if (g_vartbl[g_VarIndex].type & T_NBR)
+        if (ir_vtype & T_NBR)
             IrVarType |= 0b10;
         InterruptUsed = true;
         IrInterrupt = GetIntAddress(argv[4]); // get the interrupt location
@@ -2894,8 +2906,8 @@ void setBacklight(int level, int setfrequency)
     {
         level *= 255;
         level /= 100;
-        I2C_Send_Command(0x81); // SETCONTRAST
-        I2C_Send_Command((uint8_t)level);
+        I2C_Send_Command(0x81, 1); // SETCONTRAST
+        I2C_Send_Command((uint8_t)level, 1);
     }
 #if PICOMITERP2350
     else if ((Option.DISPLAY_TYPE >= SSDPANEL && Option.DISPLAY_TYPE < VIRTUAL) || Option.DISPLAY_TYPE > SSD1963_5_12BUFF)
@@ -3591,7 +3603,7 @@ void cmd_keypad(void)
             KeypadInterrupt = GetIntAddress(argv[4]); // get the interrupt location
             keypadrows = getint(argv[8], 1, 31);
             keypadcols = getint(argv[12], 1, 31);
-            parsefloatarray(argv[0], &a1float, 1, 2, dims, false);
+            parsefloatarray(argv[0], &a1float, 1, 2, dims, false, NULL);
             if (dims[0] - g_OptionBase + 1 != keypadrows)
             {
                 keypadcols = keypadrows = 0;
@@ -4051,6 +4063,294 @@ void LcdPinSet(int pin, int val)
 {
     PinSetBit(pin, val ? LATSET : LATCLR);
 }
+
+/****************************************************************************************************************************
+ The I2CLCD command - LCD control via PCF8574 I2C I/O expander
+ Standard PCF8574 wiring for LCD:
+   P0 = RS (Register Select)
+   P1 = RW (Read/Write) - always 0 for write
+   P2 = EN (Enable)
+   P3 = Backlight
+   P4 = D4
+   P5 = D5
+   P6 = D6
+   P7 = D7
+*****************************************************************************************************************************/
+
+// PCF8574 bit definitions for LCD
+#define I2CLCD_RS 0x01 // P0 - Register Select (0=command, 1=data)
+#define I2CLCD_RW 0x02 // P1 - Read/Write (0=write, 1=read)
+#define I2CLCD_EN 0x04 // P2 - Enable strobe
+#define I2CLCD_BL 0x08 // P3 - Backlight (1=on, 0=off)
+
+static uint8_t i2clcd_addr = 0;      // I2C address of the PCF8574
+static uint8_t i2clcd_backlight = 0; // Current backlight state
+
+// Write a byte to the PCF8574
+static int I2CLCD_Write(uint8_t data)
+{
+    int i2cret;
+    uint8_t buffer[1];
+    buffer[0] = data;
+
+    if (I2C1locked)
+        i2cret = i2c_write_timeout_us(i2c1, i2clcd_addr, buffer, 1, false, 1000000);
+    else
+        i2cret = i2c_write_timeout_us(i2c0, i2clcd_addr, buffer, 1, false, 1000000);
+
+    if (i2cret == PICO_ERROR_GENERIC || i2cret == PICO_ERROR_TIMEOUT)
+        return 0;
+    return 1;
+}
+
+// Send a nibble (4 bits) to the LCD via I2C
+static void I2CLCD_Nibble(int data, int rs, int wait_us)
+{
+    uint8_t nibble;
+
+    // Build nibble: data in upper 4 bits (D4-D7), plus RS and backlight
+    nibble = ((data & 0x0F) << 4) | i2clcd_backlight;
+    if (rs)
+        nibble |= I2CLCD_RS;
+
+    // Pulse enable high
+    I2CLCD_Write(nibble | I2CLCD_EN);
+    uSec(1); // Enable pulse must be >450ns
+
+    // Pulse enable low
+    I2CLCD_Write(nibble);
+
+    if (wait_us)
+        uSec(wait_us);
+    else
+        uSec(50); // Commands need >37us to settle
+}
+
+// Send a full byte (as two nibbles) to the LCD
+static void I2CLCD_Byte(int data, int rs, int wait_us)
+{
+    I2CLCD_Nibble(data >> 4, rs, 0);         // High nibble first
+    I2CLCD_Nibble(data & 0x0F, rs, wait_us); // Then low nibble
+}
+
+void cmd_i2clcd(void)
+{
+    unsigned char *p;
+    int i, j;
+
+    if ((p = checkstring(cmdline, (unsigned char *)"INIT")))
+    {
+        int addr;
+        getcsargs(&p, 3);
+        if (argc < 1)
+            SyntaxError();
+
+        // Check System I2C is configured
+        if (!(I2C0locked || I2C1locked))
+            StandardError(44); // "SYSTEM I2C not configured"
+
+        // Check if already open
+        if (i2clcd_addr)
+            StandardError(31); // "Already open"
+
+        // Get I2C address
+        addr = getint(argv[0], 0x20, 0x3F); // PCF8574 typically 0x20-0x27, PCF8574A is 0x38-0x3F
+        if (!((addr >= 0x20 && addr <= 0x27) || (addr >= 0x38 && addr <= 0x3F)))
+            error("Invalid address");
+        i2clcd_addr = addr;
+        i2clcd_backlight = I2CLCD_BL; // Backlight on by default
+
+        // Initialize LCD in 4-bit mode
+        // Wait for LCD to power up
+        uSec(50000); // >40ms after power on
+
+        // Send reset sequence (3 times to ensure 4-bit mode)
+        I2CLCD_Write(i2clcd_backlight); // Start with backlight on, all low
+        uSec(1000);
+
+        // Special initialization sequence for 4-bit mode
+        I2CLCD_Nibble(0x03, 0, 5000); // Function set (8-bit mode) - wait 4.1ms
+        I2CLCD_Nibble(0x03, 0, 5000); // Function set (8-bit mode) - wait 100us
+        I2CLCD_Nibble(0x03, 0, 5000); // Function set (8-bit mode)
+        I2CLCD_Nibble(0x02, 0, 2000); // Function set (4-bit mode)
+
+        // Now in 4-bit mode, can send full bytes
+        I2CLCD_Byte(0b00101000, 0, 600);  // Function set: 4-bit, 2 lines, 5x8 font
+        I2CLCD_Byte(0b00001100, 0, 600);  // Display on, cursor off, blink off
+        I2CLCD_Byte(0b00000110, 0, 600);  // Entry mode: increment, no shift
+        I2CLCD_Byte(0b00000001, 0, 3000); // Clear display
+
+        // Create degree symbol at CGRAM location 0
+        // Pattern: 7,5,7,0,0,0,0,0 creates a small ° symbol
+        I2CLCD_Byte(0x40, 0, 600); // Set CGRAM address 0
+        I2CLCD_Byte(7, 1, 0);      // Line 0: .0111
+        I2CLCD_Byte(5, 1, 0);      // Line 1: .0101
+        I2CLCD_Byte(7, 1, 0);      // Line 2: .0111
+        I2CLCD_Byte(0, 1, 0);      // Line 3: .0000
+        I2CLCD_Byte(0, 1, 0);      // Line 4: .0000
+        I2CLCD_Byte(0, 1, 0);      // Line 5: .0000
+        I2CLCD_Byte(0, 1, 0);      // Line 6: .0000
+        I2CLCD_Byte(0, 1, 0);      // Line 7: .0000
+        I2CLCD_Byte(0x80, 0, 600); // Return to DDRAM address 0
+        return;
+    }
+
+    // All other commands require init first
+    if (!i2clcd_addr)
+        error("Not open");
+
+    if (checkstring(cmdline, (unsigned char *)"CLOSE"))
+    {
+        // Turn off backlight and clear address
+        I2CLCD_Write(0);
+        i2clcd_addr = 0;
+        i2clcd_backlight = 0;
+    }
+    else if (checkstring(cmdline, (unsigned char *)"CLEAR"))
+    {
+        // Clear display
+        I2CLCD_Byte(0b00000001, 0, 3000);
+    }
+    else if ((p = checkstring(cmdline, (unsigned char *)"BACKLIGHT")))
+    {
+        // Control backlight
+        int state = getint(p, 0, 1);
+        if (state)
+            i2clcd_backlight = I2CLCD_BL;
+        else
+            i2clcd_backlight = 0;
+        // Update the PCF8574 output
+        I2CLCD_Write(i2clcd_backlight);
+    }
+    else if ((p = checkstring(cmdline, (unsigned char *)"CMD")) || (p = checkstring(cmdline, (unsigned char *)"DATA")))
+    {
+        // Send command(s) or data byte(s)
+        int is_data = (mytoupper(*cmdline) == 'D');
+        getcsargs(&p, MAX_ARG_COUNT * 2);
+        for (i = 0; i < argc; i += 2)
+        {
+            j = getint(argv[i], 0, 255);
+            I2CLCD_Byte(j, is_data, 0);
+        }
+    }
+    else if ((p = checkstring(cmdline, (unsigned char *)"CURSOR")))
+    {
+        // Set cursor: I2CLCD CURSOR ON/OFF [, BLINK]
+        getcsargs(&p, 3);
+        if (argc < 1)
+            SyntaxError();
+        int cursor_on = 0, blink_on = 0;
+        if (checkstring(argv[0], (unsigned char *)"ON"))
+            cursor_on = 1;
+        else if (checkstring(argv[0], (unsigned char *)"OFF"))
+            cursor_on = 0;
+        else
+            cursor_on = getint(argv[0], 0, 1);
+
+        if (argc == 3)
+        {
+            if (checkstring(argv[2], (unsigned char *)"BLINK"))
+                blink_on = 1;
+            else
+                blink_on = getint(argv[2], 0, 1);
+        }
+        // Display control: 0b00001DCB (D=display, C=cursor, B=blink)
+        I2CLCD_Byte(0b00001100 | (cursor_on << 1) | blink_on, 0, 600);
+    }
+    else if ((p = checkstring(cmdline, (unsigned char *)"CREATECHAR")))
+    {
+        // Define a custom character: I2CLCD CREATECHAR code, line0, line1, line2, line3, line4, line5, line6, line7
+        // code is 0-7, lines are 8 bytes defining the 5x8 pixel pattern
+        int code, k;
+        getcsargs(&p, 17);
+        if (argc != 17)
+            SyntaxError();
+
+        code = getint(argv[0], 0, 7); // Character code 0-7
+
+        // Set CGRAM address: 0x40 | (code << 3)
+        I2CLCD_Byte(0x40 | (code << 3), 0, 600);
+
+        // Write the 8 bytes of character data
+        // argv[0]=code, argv[2]=line0, argv[4]=line1, ... argv[16]=line7
+        for (k = 0; k < 8; k++)
+        {
+            j = getint(argv[2 + k * 2], 0, 31); // Only 5 bits per line (0-31)
+            I2CLCD_Byte(j, 1, 0);
+        }
+
+        // Return to DDRAM mode (set address to 0)
+        I2CLCD_Byte(0x80, 0, 600);
+    }
+    else
+    {
+        // Print text to LCD: I2CLCD line, pos, string$
+        // or: I2CLCD line, C8/C16/C20/C40, string$ (centered)
+        const char linestart[4] = {0, 64, 20, 84};
+        int center, pos;
+
+        getcsargs(&cmdline, 5);
+        if (argc != 5)
+            SyntaxError();
+
+        i = getint(argv[0], 1, 4); // Line number 1-4
+        pos = 1;
+
+        // Check for centering options
+        if (checkstring(argv[2], (unsigned char *)"C8"))
+            center = 8;
+        else if (checkstring(argv[2], (unsigned char *)"C16"))
+            center = 16;
+        else if (checkstring(argv[2], (unsigned char *)"C20"))
+            center = 20;
+        else if (checkstring(argv[2], (unsigned char *)"C40"))
+            center = 40;
+        else
+        {
+            center = 0;
+            pos = getint(argv[2], 1, 256);
+        }
+
+        p = getstring(argv[4]); // Get the string to display
+
+        // Set DDRAM address: 0x80 | address
+        i = 128 + linestart[i - 1] + (pos - 1);
+        I2CLCD_Byte(i, 0, 600);
+
+        // Print leading spaces for centering
+        for (j = 0; j < (center - *p) / 2; j++)
+        {
+            I2CLCD_Byte(' ', 1, 0);
+        }
+
+        // Print the string (p[0] is length, p[1...] is data)
+        for (i = 1; i <= *p; i++)
+        {
+            I2CLCD_Byte(p[i], 1, 0);
+            j++;
+        }
+
+        // Print trailing spaces for centering
+        for (; j < center; j++)
+        {
+            I2CLCD_Byte(' ', 1, 0);
+        }
+    }
+}
+
+// Close I2CLCD on program end/reset
+void I2CLCD_Close(void)
+{
+    if (i2clcd_addr)
+    {
+        I2CLCD_Write(0); // Turn off backlight
+        i2clcd_addr = 0;
+        i2clcd_backlight = 0;
+    }
+}
+
+/*  @endcond */
+
 int64_t DHmem(int pin)
 {
     int timeout = 400;
@@ -4238,6 +4538,8 @@ void fun_dev(void)
     {
         unsigned char *p;
         getcsargs(&tp, 1);
+        if (!nunchuck1)
+            error("Not open");
         p = argv[0];
         if (mytoupper(*p) == 'A')
         {
@@ -4499,7 +4801,7 @@ void cmd_WS2812(void)
     nbr = getint(argv[4], 1, 256);
     if (nbr > 1)
     {
-        parseintegerarray(argv[6], &dest, 4, 1, NULL, false);
+        parseintegerarray(argv[6], &dest, 4, 1, NULL, false, NULL);
     }
     else
     {
@@ -4570,6 +4872,173 @@ void __not_in_flash_func(bitstream)(uint64_t gppin, unsigned int *data, int num)
     {
         gpio_xor_mask64(gppin);
         shortpause(data[i])
+    }
+}
+// Dual-channel bitstream: gppin1/gppin2 are pin masks, mode1/mode2: 0=push-pull, 1=open-collector
+// data1/data2 are timing arrays (systick countdown target values), num1/num2 are counts
+// Each array entry is a countdown target for shortpause
+// If both pins are the same (samepin=1), logic parameter controls combination:
+//   logic: 0=XOR (toggle on either), 1=AND, 2=OR
+void __not_in_flash_func(bitstream2)(uint64_t gppin1, int gpno1, int mode1, unsigned int *data1, int num1,
+                                     uint64_t gppin2, int gpno2, int mode2, unsigned int *data2, int num2,
+                                     int samepin, int logic)
+{
+    int idx1 = 0, idx2 = 0;
+    // Work with "ticks to wait" (16777215 - countdown_target) for easier math
+    // Larger ticks_to_wait = longer wait
+    unsigned int ticks1 = 0, ticks2 = 0;
+    // State tracking: for push-pull, 0=current output level matches initial
+    // For open-collector: pin starts Hi-Z (HIGH), so state=1 means HIGH, state=0 means driven LOW
+    // Initialize based on mode so first toggle produces correct action
+    int state1 = (mode1 == 1) ? 1 : 0; // OC starts Hi-Z (HIGH), so state=1
+    int state2 = (mode2 == 1) ? 1 : 0;
+    int prev_combined = 0; // For same-pin logic modes, track previous combined state
+
+    // For same-pin mode with logic, compute initial combined state
+    if (samepin && logic != 0)
+    {
+        if (logic == 1) // AND
+            prev_combined = state1 & state2;
+        else // OR
+            prev_combined = state1 | state2;
+    }
+
+    // Convert countdown targets to ticks-to-wait
+    if (num1 > 0)
+        ticks1 = 16777215 - data1[0];
+    if (num2 > 0)
+        ticks2 = 16777215 - data2[0];
+
+    while (idx1 < num1 || idx2 < num2)
+    {
+        unsigned int wait_ticks;
+        int do_ch1 = 0, do_ch2 = 0;
+
+        if (idx1 >= num1)
+        {
+            // Only channel 2 has events left
+            wait_ticks = ticks2;
+            do_ch2 = 1;
+        }
+        else if (idx2 >= num2)
+        {
+            // Only channel 1 has events left
+            wait_ticks = ticks1;
+            do_ch1 = 1;
+        }
+        else if (ticks1 < ticks2)
+        {
+            // Channel 1 event comes first (smaller ticks = shorter wait)
+            wait_ticks = ticks1;
+            do_ch1 = 1;
+        }
+        else if (ticks2 < ticks1)
+        {
+            // Channel 2 event comes first
+            wait_ticks = ticks2;
+            do_ch2 = 1;
+        }
+        else
+        {
+            // Simultaneous events
+            wait_ticks = ticks1;
+            do_ch1 = 1;
+            do_ch2 = 1;
+        }
+
+        // Wait for the next event (convert ticks back to countdown target)
+        shortpause(16777215 - wait_ticks)
+
+            // Subtract elapsed time from non-firing channels
+            if (idx1 < num1 && !do_ch1)
+                ticks1 -= wait_ticks;
+        if (idx2 < num2 && !do_ch2)
+            ticks2 -= wait_ticks;
+
+        // Update logical states
+        if (do_ch1)
+        {
+            state1 = !state1;
+            idx1++;
+            if (idx1 < num1)
+                ticks1 = 16777215 - data1[idx1];
+        }
+        if (do_ch2)
+        {
+            state2 = !state2;
+            idx2++;
+            if (idx2 < num2)
+                ticks2 = 16777215 - data2[idx2];
+        }
+
+        // Handle pin output based on same-pin mode and logic
+        if (samepin)
+        {
+            // Same pin - apply logic function
+            int combined;
+            if (logic == 0)
+            {
+                // XOR mode: toggle on any event (original behavior)
+                gpio_xor_mask64(gppin1);
+            }
+            else
+            {
+                // AND or OR mode: only change output when combined state changes
+                if (logic == 1)
+                    combined = state1 & state2;
+                else
+                    combined = state1 | state2;
+
+                if (combined != prev_combined)
+                {
+                    if (mode1 == 0)
+                    {
+                        gpio_xor_mask64(gppin1);
+                    }
+                    else
+                    {
+                        if (combined)
+                            gpio_set_dir(gpno1, GPIO_IN);
+                        else
+                            gpio_set_dir(gpno1, GPIO_OUT);
+                    }
+                    prev_combined = combined;
+                }
+            }
+        }
+        else
+        {
+            // Different pins - handle independently
+            if (do_ch1)
+            {
+                if (mode1 == 0)
+                {
+                    gpio_xor_mask64(gppin1);
+                }
+                else
+                {
+                    if (state1)
+                        gpio_set_dir(gpno1, GPIO_IN);
+                    else
+                        gpio_set_dir(gpno1, GPIO_OUT);
+                }
+            }
+
+            if (do_ch2)
+            {
+                if (mode2 == 0)
+                {
+                    gpio_xor_mask64(gppin2);
+                }
+                else
+                {
+                    if (state2)
+                        gpio_set_dir(gpno2, GPIO_IN);
+                    else
+                        gpio_set_dir(gpno2, GPIO_OUT);
+                }
+            }
+        }
     }
 }
 void __not_in_flash_func(serialtx)(uint64_t gppin, unsigned char *string, int bittime)
@@ -4719,6 +5188,239 @@ int __not_in_flash_func(serialrx)(
         }
     }
 }
+void cmd_bitstream(void)
+{
+    int i, num, size;
+    uint32_t pin;
+    int ticks_per_millisecond = ticks_per_second / 1000;
+    MMFLOAT *a1float = NULL;
+    int64_t *a1int = NULL;
+    unsigned int *data;
+    getcsargs(&cmdline, 17); // Support up to 8 arguments for dual-pin mode
+
+    if (argc == 5 || argc == 7)
+    {
+        // Single pin syntax:
+        // 3 params (argc==5): BITSTREAM pin, count, array()
+        // 4 params (argc==7): BITSTREAM pin, count, array(), mode
+        int mode = 0;
+        num = getint(argv[2], 1, 10000);
+        unsigned char code;
+        if (!(code = codecheck(argv[0])))
+            argv[0] += 2;
+        pin = getinteger(argv[0]);
+        if (!code)
+            pin = codemap(pin);
+        if (IsInvalidPin(pin))
+            StandardError(9);
+        int gpno = PinDef[pin].GPno;
+        uint64_t gppin = ((uint64_t)1 << gpno);
+        if (!(ExtCurrentConfig[pin] == EXT_DIG_OUT || ExtCurrentConfig[pin] == EXT_NOT_CONFIG))
+            StandardErrorParam2(43, pin, pin);
+        if (ExtCurrentConfig[pin] == EXT_NOT_CONFIG)
+            ExtCfg(pin, EXT_DIG_OUT, 0);
+        // Check for optional mode parameter
+        if (argc >= 7 && *argv[6])
+            mode = getint(argv[6], 0, 1);
+        if (mode == 1)
+        {
+            // Open-collector mode requires even number of transitions to return to Hi-Z
+            if (num & 1)
+                error("Open-collector mode requires even number of transitions");
+            // Open-collector: start in Hi-Z state (input with pullup)
+            gpio_set_pulls(gpno, true, false);
+            gpio_set_dir(gpno, GPIO_IN);
+            gpio_put(gpno, 0); // Pre-set output register to low for when we switch to output
+        }
+        size = parsenumberarray(argv[4], &a1float, &a1int, 3, 1, NULL, false, NULL);
+        if (size < num)
+            error("Array too small");
+        data = GetTempMainMemory(num * sizeof(unsigned int));
+        if (a1float != NULL)
+        {
+            for (i = 0; i < num; i++)
+                data[i] = FloatToUint32(*a1float++);
+        }
+        else
+        {
+            for (i = 0; i < num; i++)
+            {
+                if (*a1int < 0 || *a1int > 67108)
+                    error("Number range");
+                data[i] = *a1int++;
+            }
+        }
+        for (i = 0; i < num; i++)
+        {
+            data[i] = 16777215 + setuptime - ((data[i] * ticks_per_millisecond) / 1000);
+        }
+        disable_interrupts_pico();
+        if (mode == 0)
+        {
+            bitstream(gppin, data, num);
+        }
+        else
+        {
+            // Use bitstream2 with same pin for both channels, second channel has 0 events
+            bitstream2(gppin, gpno, mode, data, num, gppin, gpno, mode, NULL, 0, 0, 0);
+        }
+        enable_interrupts_pico();
+    }
+    else if (argc == 13 || argc == 15 || argc == 17)
+    {
+        // Dual-pin syntax:
+        // 7 params (argc==13): BITSTREAM pin1, count1, array1(), mode1, pin2, count2, array2()
+        // 8 params (argc==15): BITSTREAM pin1, count1, array1(), mode1, pin2, count2, array2(), mode2
+        // 9 params (argc==17): BITSTREAM pin1, count1, array1(), mode1, pin2, count2, array2(), mode2, logic
+        // mode: 0 = push-pull (driven high/low), 1 = open-collector (driven low, Hi-Z high)
+        // logic: 0 = XOR (toggle on either channel), 1 = AND, 2 = OR (only when pin1 == pin2)
+        uint32_t pin1, pin2;
+        int mode1 = 0, mode2 = 0, num1, num2, size1, size2;
+        int logic = 0; // Default to XOR (original behavior)
+        MMFLOAT *a1float1 = NULL, *a1float2 = NULL;
+        int64_t *a1int1 = NULL, *a1int2 = NULL;
+        unsigned int *data1, *data2;
+        unsigned char code1, code2;
+
+        // Parse pin1
+        if (!(code1 = codecheck(argv[0])))
+            argv[0] += 2;
+        pin1 = getinteger(argv[0]);
+        if (!code1)
+            pin1 = codemap(pin1);
+        if (IsInvalidPin(pin1))
+            StandardError(9);
+
+        // Parse count1
+        num1 = getint(argv[2], 1, 10000);
+
+        // argv[4] = array1()
+
+        // Parse mode1 if specified
+        if (argc >= 7 && *argv[6])
+            mode1 = getint(argv[6], 0, 1);
+
+        // Parse pin2
+        if (!(code2 = codecheck(argv[8])))
+            argv[8] += 2;
+        pin2 = getinteger(argv[8]);
+        if (!code2)
+            pin2 = codemap(pin2);
+        if (IsInvalidPin(pin2))
+            StandardError(9);
+
+        // Parse count2
+        num2 = getint(argv[10], 1, 10000);
+
+        // argv[12] = array2()
+
+        // Check for optional mode2 parameter
+        if (argc >= 15 && *argv[14])
+            mode2 = getint(argv[14], 0, 1);
+
+        // Check for optional logic parameter (only valid when pin1 == pin2)
+        if (argc == 17)
+            logic = getint(argv[16], 0, 2);
+
+        // Configure pin1
+        uint64_t gppin1 = ((uint64_t)1 << PinDef[pin1].GPno);
+        int gpno1 = PinDef[pin1].GPno;
+        if (!(ExtCurrentConfig[pin1] == EXT_DIG_OUT || ExtCurrentConfig[pin1] == EXT_NOT_CONFIG))
+            StandardErrorParam2(43, pin1, pin1);
+        if (ExtCurrentConfig[pin1] == EXT_NOT_CONFIG)
+            ExtCfg(pin1, EXT_DIG_OUT, 0);
+        if (mode1 == 1)
+        {
+            // Open-collector mode requires even number of transitions to return to Hi-Z
+            if (num1 & 1)
+                error("Open-collector mode requires even number of transitions for pin1");
+            // Open-collector: start in Hi-Z state (input with pullup)
+            gpio_set_pulls(gpno1, true, false);
+            gpio_set_dir(gpno1, GPIO_IN);
+            gpio_put(gpno1, 0); // Pre-set output register to low for when we switch to output
+        }
+
+        // Configure pin2
+        uint64_t gppin2 = ((uint64_t)1 << PinDef[pin2].GPno);
+        int gpno2 = PinDef[pin2].GPno;
+        if (pin1 != pin2)
+        { // Only configure if different pin
+            if (!(ExtCurrentConfig[pin2] == EXT_DIG_OUT || ExtCurrentConfig[pin2] == EXT_NOT_CONFIG))
+                StandardErrorParam2(43, pin2, pin2);
+            if (ExtCurrentConfig[pin2] == EXT_NOT_CONFIG)
+                ExtCfg(pin2, EXT_DIG_OUT, 0);
+        }
+        if (mode2 == 1)
+        {
+            // Open-collector mode requires even number of transitions to return to Hi-Z
+            if (num2 & 1)
+                error("Open-collector mode requires even number of transitions for pin2");
+            // Open-collector: start in Hi-Z state (input with pullup)
+            gpio_set_pulls(gpno2, true, false);
+            gpio_set_dir(gpno2, GPIO_IN);
+            gpio_put(gpno2, 0); // Pre-set output register to low for when we switch to output
+        }
+
+        // Parse array1
+        size1 = parsenumberarray(argv[4], &a1float1, &a1int1, 3, 1, NULL, false, NULL);
+        if (size1 < num1)
+            error("Array 1 too small");
+        data1 = GetTempMainMemory(num1 * sizeof(unsigned int));
+        if (a1float1 != NULL)
+        {
+            for (i = 0; i < num1; i++)
+                data1[i] = FloatToUint32(*a1float1++);
+        }
+        else
+        {
+            for (i = 0; i < num1; i++)
+            {
+                if (*a1int1 < 0 || *a1int1 > 67108)
+                    error("Number range");
+                data1[i] = *a1int1++;
+            }
+        }
+        for (i = 0; i < num1; i++)
+        {
+            data1[i] = 16777215 + setuptime - ((data1[i] * ticks_per_millisecond) / 1000);
+        }
+
+        // Parse array2
+        size2 = parsenumberarray(argv[12], &a1float2, &a1int2, 7, 1, NULL, false, NULL);
+        if (size2 < num2)
+            error("Array 2 too small");
+        data2 = GetTempMainMemory(num2 * sizeof(unsigned int));
+        if (a1float2 != NULL)
+        {
+            for (i = 0; i < num2; i++)
+                data2[i] = FloatToUint32(*a1float2++);
+        }
+        else
+        {
+            for (i = 0; i < num2; i++)
+            {
+                if (*a1int2 < 0 || *a1int2 > 67108)
+                    error("Number range");
+                data2[i] = *a1int2++;
+            }
+        }
+        for (i = 0; i < num2; i++)
+        {
+            data2[i] = 16777215 + setuptime - ((data2[i] * ticks_per_millisecond) / 1000);
+        }
+
+        // Detect same-pin mode
+        int samepin = (pin1 == pin2) ? 1 : 0;
+
+        // Validate: logic parameter only valid when pins are the same
+        if (!samepin && logic != 0)
+            error("Logic parameter only valid when both pins are the same");
+
+        disable_interrupts_pico();
+        bitstream2(gppin1, gpno1, mode1, data1, num1, gppin2, gpno2, mode2, data2, num2, samepin, logic);
+        enable_interrupts_pico();
+    }
+}
 /*  @endcond */
 void cmd_device(void)
 {
@@ -4790,6 +5492,13 @@ void cmd_device(void)
     {
         cmdline = tp;
         cmd_DHT22();
+        return;
+    }
+    tp = checkstring(cmdline, (unsigned char *)"BITSTREAM");
+    if (tp)
+    {
+        cmdline = tp;
+        cmd_bitstream();
         return;
     }
     tp = checkstring(cmdline, (unsigned char *)"SERIALRX");
@@ -4867,60 +5576,6 @@ void cmd_device(void)
         int bittime = 16777215 + 12 - (ticks_per_second / baudrate);
         disable_interrupts_pico();
         serialtx(gppin, string, bittime);
-        enable_interrupts_pico();
-        return;
-    }
-    tp = checkstring(cmdline, (unsigned char *)"BITSTREAM");
-    if (tp)
-    {
-        int i, num, size;
-        uint32_t pin;
-        int ticks_per_millisecond = ticks_per_second / 1000;
-        MMFLOAT *a1float = NULL;
-        int64_t *a1int = NULL;
-        unsigned int *data;
-        getcsargs(&tp, 5);
-        if (!(argc == 5))
-            StandardError(2);
-        num = getint(argv[2], 1, 10000);
-        unsigned char code;
-        if (!(code = codecheck(argv[0])))
-            argv[0] += 2;
-        pin = getinteger(argv[0]);
-        if (!code)
-            pin = codemap(pin);
-        if (IsInvalidPin(pin))
-            StandardError(9);
-        uint64_t gppin = ((uint64_t)1 << PinDef[pin].GPno);
-        if (!(ExtCurrentConfig[pin] == EXT_DIG_OUT || ExtCurrentConfig[pin] == EXT_NOT_CONFIG))
-            StandardErrorParam2(43, pin, pin);
-        if (ExtCurrentConfig[pin] == EXT_NOT_CONFIG)
-            ExtCfg(pin, EXT_DIG_OUT, 0);
-        size = parsenumberarray(argv[4], &a1float, &a1int, 3, 1, NULL, false);
-        if (size < num)
-            error("Array too small");
-        data = GetTempMainMemory(num * sizeof(unsigned int));
-        if (a1float != NULL)
-        {
-            for (i = 0; i < num; i++)
-                data[i] = FloatToUint32(*a1float++);
-        }
-        else
-        {
-            for (i = 0; i < num; i++)
-            {
-                if (*a1int < 0 || *a1int > 67108)
-                    error("Number range");
-                data[i] = *a1int++;
-            }
-        }
-        for (i = 0; i < num; i++)
-        {
-            data[i] = 16777215 + setuptime - ((data[i] * ticks_per_millisecond) / 1000);
-        }
-        //        data[0]+=((ticks_per_millisecond/2000)+(250000-Option.CPU_Speed)/1000);
-        disable_interrupts_pico();
-        bitstream(gppin, data, num);
         enable_interrupts_pico();
         return;
     }
@@ -5112,10 +5767,10 @@ void cmd_adc(void)
 #else
         short dims[MAXDIM] = {0};
 #endif
-        int card1 = parseintegerarray(argv[0], &adcval, 1, 1, dims, true);
+        int card1 = parseintegerarray(argv[0], &adcval, 1, 1, dims, true, NULL);
         adcint1 = (uint8_t *)adcval;
         adcval = NULL;
-        ADCmax = parseintegerarray(argv[2], &adcval, 2, 1, dims, true);
+        ADCmax = parseintegerarray(argv[2], &adcval, 2, 1, dims, true, NULL);
         adcint2 = (uint8_t *)adcval;
         if (card1 != ADCmax)
             error("Array size mismatch %,%", card1, ADCmax);
@@ -5209,12 +5864,12 @@ void cmd_adc(void)
             ADCscale[i] = VCC / 4095.0;
             ADCbottom[i] = 0;
         }
-        ADCmax = parsefloatarray(argv[0], (MMFLOAT **)&a1float, 1, 1, NULL, true);
+        ADCmax = parsefloatarray(argv[0], (MMFLOAT **)&a1float, 1, 1, NULL, true, NULL);
         if (argc >= 3 && *argv[2])
         {
             if (ADCopen < 2)
                 error("Second channel not open");
-            card = parsefloatarray(argv[2], (MMFLOAT **)&a2float, 2, 1, NULL, true);
+            card = parsefloatarray(argv[2], (MMFLOAT **)&a2float, 2, 1, NULL, true, NULL);
             if (card != ADCmax)
                 StandardError(16);
         }
@@ -5222,7 +5877,7 @@ void cmd_adc(void)
         {
             if (ADCopen < 3)
                 error("Third channel not open");
-            card = parsefloatarray(argv[4], (MMFLOAT **)&a3float, 3, 1, NULL, true);
+            card = parsefloatarray(argv[4], (MMFLOAT **)&a3float, 3, 1, NULL, true, NULL);
             if (card != ADCmax)
                 StandardError(16);
         }
@@ -5230,7 +5885,7 @@ void cmd_adc(void)
         {
             if (ADCopen < 4)
                 error("Fourth channel not open");
-            card = parsefloatarray(argv[6], (MMFLOAT **)&a4float, 4, 1, NULL, true);
+            card = parsefloatarray(argv[6], (MMFLOAT **)&a4float, 4, 1, NULL, true, NULL);
             if (card != ADCmax)
                 StandardError(16);
         }
@@ -5444,7 +6099,8 @@ void MIPS16 ClearExternalIO(void)
     CallBackEnabled &= (~32);
     for (i = 0; i < MAXBLITBUF; i++)
     {
-        spritebuff[i].spritebuffptr = NULL;
+        if (spritebuff[i] != NULL)
+            spritebuff[i]->spritebuffptr = NULL;
         blitbuff[i].blitbuffptr = NULL;
     }
     CallBackEnabled = 0;
@@ -5458,6 +6114,7 @@ void MIPS16 ClearExternalIO(void)
         }
     }
     memset(lcd_pins, 0, sizeof(lcd_pins));
+    I2CLCD_Close(); // Close I2C LCD if open
     SerialClose(1);
     SerialClose(2); // same for serial ports
     if (!I2C0locked)
@@ -5685,12 +6342,10 @@ void MIPS16 ClearExternalIO(void)
     MQTTComplete = 0;
     closeMQTT();
 #endif
-#ifndef PICOMITEWEB
-#ifdef PICOMITEVGA
     CollisionFound = false;
     COLLISIONInterrupt = NULL;
-#endif
-#endif
+    STCollisionFound = false;
+    STCollisionInterrupt = NULL;
 #ifdef GUICONTROLS
     gui_int_down = false;
     gui_int_up = false;

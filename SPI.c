@@ -318,6 +318,7 @@ unsigned int *GetSendDataList(unsigned char *p, unsigned int *nbr)
         ptr = findvar(argv[2], V_NOFIND_NULL | V_EMPTY_OK);
         if (ptr == NULL)
             StandardError(6);
+        CHECK_STRUCT_MEMBER_ARRAY();  // Struct member arrays not supported here
 
         // now check if it is a non array string
         if (g_vartbl[g_VarIndex].type & T_STR)
@@ -390,6 +391,7 @@ long long int *GetReceiveDataBuffer(unsigned char *p, unsigned int *nbr)
     ptr = findvar(argv[2], V_NOFIND_NULL | V_EMPTY_OK);
     if (ptr == NULL)
         StandardError(6);
+    CHECK_STRUCT_MEMBER_ARRAY();  // Struct member arrays not supported here
     if ((g_vartbl[g_VarIndex].type & T_INT) && g_vartbl[g_VarIndex].dims[0] > 0 && g_vartbl[g_VarIndex].dims[1] == 0)
     { // integer array
         if ((((long long int *)ptr - g_vartbl[g_VarIndex].val.ia) + *nbr) > (g_vartbl[g_VarIndex].dims[0] + 1 - g_OptionBase))

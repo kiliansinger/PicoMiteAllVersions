@@ -1096,7 +1096,11 @@ void MIPS16 InitDisplaySSD(void)
 ////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 // Write a command byte to the SSD1963
+#if PICOMITERP2350
+void __not_in_flash_func(WriteComand)(int cmd)
+#else
 void WriteComand(int cmd)
+#endif
 {
     gpio_put_masked64(writemask, ((uint64_t)cmd << SSD1963data));
     gpio_put(SSD1963_DC_GPPIN, 0);
@@ -1116,7 +1120,11 @@ void __not_in_flash_func(WriteComandd0)(int cmd)
 }
 
 // Write an 8 bit data word to the SSD1963
+#if PICOMITERP2350
+void __not_in_flash_func(WriteData)(int data)
+#else
 void WriteData(int data)
+#endif
 {
     gpio_put_masked64(writemask, ((uint64_t)data << SSD1963data));
     gpio_put(SSD1963_WR_GPPIN, 0);
@@ -1149,7 +1157,11 @@ void __not_in_flash_func(WriteColorFlex)(unsigned int c)
     }
     else if ((Option.DISPLAY_TYPE > SSD_PANEL_8 && Option.DISPLAY_TYPE < VIRTUAL) || Option.DISPLAY_TYPE == SSD1963_5_16BUFF || Option.DISPLAY_TYPE == SSD1963_7_16BUFF)
 #else
+#if PICOMITERP2350
+void __not_in_flash_func(WriteColorFlex)(unsigned int c)
+#else
 void WriteColorFlex(unsigned int c)
+#endif
 {
     if (Option.DISPLAY_TYPE > SSD_PANEL_8)
 #endif
@@ -1299,7 +1311,11 @@ unsigned int ReadDataSlow(void)
  * defines start/end coordinates for memory access from host to SSD1963
  * also maps the start and end points to suit the orientation
  ********************************************************************/
+#if PICOMITERP2350
+void __not_in_flash_func(SetAreaSSD1963)(int x1, int y1, int x2, int y2)
+#else
 void SetAreaSSD1963(int x1, int y1, int x2, int y2)
+#endif
 {
     int start_x, start_y, end_x, end_y;
 

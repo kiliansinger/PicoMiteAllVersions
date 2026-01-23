@@ -141,8 +141,6 @@ void MIPS16 cmd_xmodem(void)
         // no file name, so this is a transfer to/from program memory
         if (CurrentLinePtr)
             StandardError(10);
-        if (Option.DISPLAY_TYPE >= VIRTUAL && WriteBuf)
-            FreeMemorySafe((void **)&WriteBuf);
         if (rcv)
             ClearProgram(true); // we need all the RAM
         else
@@ -150,6 +148,17 @@ void MIPS16 cmd_xmodem(void)
             closeframebuffer('A');
             CloseAudio(1);
             ClearVars(0, true);
+#ifdef STRUCTENABLED
+            // Clear structure type definitions to free heap memory
+            for (int i = 0; i < MAX_STRUCT_TYPES; i++)
+            {
+                if (g_structtbl[i] != NULL)
+                {
+                    FreeMemorySafe((void **)&g_structtbl[i]);
+                }
+            }
+            g_structcnt = 0;
+#endif
         }
         buf = GetTempMemory(XMODEMBUFFERSIZE);
         if (rcv)
@@ -183,6 +192,7 @@ void MIPS16 cmd_xmodem(void)
                         p += strlen(p);
                         if ((p - buf) > (XMODEMBUFFERSIZE - STRINGSIZE))
                             StandardError(29);
+                        *p++ = '\r';
                         *p++ = '\n';
                         *p = 0; // terminate that line
                     }
@@ -270,7 +280,11 @@ void MIPS16 cmd_xmodem(void)
 // Returns the byte value (0-255) on success, or -1 on timeout/no data
 // When timeout = 0, returns count of bytes in FIFO (0 if empty, -1 unchanged for compatibility)
 // Replace the _inbyte function with this corrected version
+#ifdef rp2350
 #define FIFOSIZE 1024
+#else
+#define FIFOSIZE 128
+#endif
 #if !defined(PICOMITEWEB) && !defined(rp2350)
 int __not_in_flash_func(_inbyte)(int timeout)
 #else
@@ -901,7 +915,7 @@ void ymodemTransmit(char *p, int fnbr, char *filename, long file_size)
             break;
 
         // Read data
-        memset(buf, 0x1A, packet_size); // Fill with SUB (padding)
+        memset(buf, 0, packet_size); // Fill with NULL (padding)
 
         if (p != NULL)
         {
@@ -1242,7 +1256,7 @@ void xmodemTransmit(char *p, int fnbr, long data_size)
             break;
 
         // Read data for this packet
-        memset(buf, 0x1A, XPACKET_SIZE); // Fill with SUB (padding)
+        memset(buf, 0, XPACKET_SIZE); // Fill with NULL (padding)
 
         if (p != NULL)
         {

@@ -1871,7 +1871,6 @@ void InitReservedIO(void)
 	{
 		ExtCfg(PINMAP[SHIFTLCKLED], EXT_DIG_OUT, 0);
 		ExtCfg(PINMAP[SHIFTLCKLED], EXT_BOOT_RESERVED, 0);
-		//		setpwm(PINMAP[41], &KeyboardlightChannel, &KeyboardlightSlice, 50000.0, Option.KeyboardBrightness);
 		for (int i = 26; i < 41; i++)
 		{
 			ExtCfg(PINMAP[i], EXT_DIG_IN, ODCSET);
@@ -2075,7 +2074,7 @@ void InitReservedIO(void)
 			I2C_enabled = 1;
 			I2C0SDApin = Option.SYSTEM_I2C_SDA;
 			I2C0SCLpin = Option.SYSTEM_I2C_SCL;
-			I2C_Timeout = SystemI2CTimeout;
+			I2C_Timeout = (Option.SYSTEM_I2C_SLOW ? SystemI2CTimeout*5 : SystemI2CTimeout);
 		}
 		else
 		{
@@ -2086,7 +2085,7 @@ void InitReservedIO(void)
 			I2C2_enabled = 1;
 			I2C1SDApin = Option.SYSTEM_I2C_SDA;
 			I2C1SCLpin = Option.SYSTEM_I2C_SCL;
-			I2C2_Timeout = SystemI2CTimeout;
+			I2C2_Timeout = (Option.SYSTEM_I2C_SLOW ? SystemI2CTimeout*5 : SystemI2CTimeout);
 		}
 		if (Option.RTC)
 			RtcGetTime(1);
@@ -2608,7 +2607,7 @@ char *pinsearch(int pin)
 	else if (pin == PINMAP[PinDef[Option.VGA_HSYNC].GPno + 1] && Option.DISPLAY_TYPE >= VGA222 && Option.DISPLAY_TYPE < NEXTGEN)
 		strcpy(buff, "VGA VSYNC");
 	else if (pin == PINMAP[PinDef[Option.VGA_BLUE].GPno + 1] && Option.DISPLAY_TYPE >= VGA222 && Option.DISPLAY_TYPE < NEXTGEN)
-		strcpy(buff, "VGA BLUE L");
+		strcpy(buff, "VGA BLUE H");
 	else if (pin == PINMAP[PinDef[Option.VGA_BLUE].GPno + 2] && Option.DISPLAY_TYPE >= VGA222 && Option.DISPLAY_TYPE < NEXTGEN)
 		strcpy(buff, "VGA GREEN L");
 	else if (pin == PINMAP[PinDef[Option.VGA_BLUE].GPno + 3] && Option.DISPLAY_TYPE >= VGA222 && Option.DISPLAY_TYPE < NEXTGEN)

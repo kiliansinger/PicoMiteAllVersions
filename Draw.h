@@ -240,24 +240,44 @@ typedef struct
  * ============================================================================ */
 struct spritebuffer
 {
-    char *spritebuffptr;                // Points to the sprite image, NULL if not in use
-    short w;                            // Width
-    short h;                            // Height
-    char *blitstoreptr;                 // Points to stored background, NULL if not in use
-    char collisions[MAXCOLLISIONS + 1]; // Current collisions, NULL if not in use
-    int64_t master;                     // Bitmask of which sprites are copies
-    uint64_t lastcollisions;            // Previous collision state
-    short x;                            // Current X position (1000 if not in use)
-    short y;                            // Current Y position
-    short next_x;                       // Next X position (1000 if not in use)
-    short next_y;                       // Next Y position
+    // 8-byte aligned fields first (16 bytes)
+    int64_t master;          // Bitmask of which sprites are copies
+    uint64_t lastcollisions; // Previous collision state
+    // 4-byte aligned pointers (24 bytes)
+    char *spritebuffptr; // Points to the sprite image, NULL if not in use
+    char *blitstoreptr;  // Points to stored background, NULL if not in use
+    short *boundsleft;
+    short *boundsright;
+    short *boundstop;
+    short *boundsbottom;
+    // 2-byte aligned shorts (28 bytes)
+    short w;                      // Width
+    short h;                      // Height
+    short x;                      // Current X position (1000 if not in use)
+    short y;                      // Current Y position
+    short next_x;                 // Next X position (1000 if not in use)
+    short next_y;                 // Next Y position
+    short backgroundcollision[8]; // Background collision (rect:l,r,t,b,boundary:l2,r2,t2,b2)
+    // 1-byte aligned chars (10 bytes, padded to 12 for alignment)
+    char collisions[MAXCOLLISIONS + 1]; // Current collisions (5 bytes)
     signed char layer;                  // Layer (defaults to 1, 0 scrolls with background)
     signed char mymaster;               // Master sprite number if this is a copy
     char rotation;                      // Rotation state
     char active;                        // Active flag
     char edges;                         // Edge collision flags
+}; // Total: 80 bytes - 3 sprites fit in one 256-byte memory page
+/* ============================================================================
+ * Type definitions - Static object for collision detection
+ * ============================================================================ */
+#define MAXSTOBJECTS 64
+struct stobject
+{
+    short x;     // X position
+    short y;     // Y position
+    short w;     // Width
+    short h;     // Height
+    char active; // Whether this object is defined
 };
-
 /* ============================================================================
  * Type definitions - Blit buffer
  * ============================================================================ */
@@ -302,14 +322,20 @@ extern s_camera camera[MAXCAM + 1];
 /* ============================================================================
  * External variables - Sprite and blit buffers
  * ============================================================================ */
-extern struct spritebuffer spritebuff[MAXBLITBUF + 1];
+#define SPRITES_PER_CHUNK 3 // Number of sprites that fit in one 256-byte memory page
+extern struct spritebuffer *spritebuff[MAXBLITBUF + 1];
 extern struct blitbuffer blitbuff[MAXBLITBUF + 1];
+extern struct stobject stobjects[MAXSTOBJECTS + 1];
 
 /* ============================================================================
  * External variables - Collision detection
  * ============================================================================ */
 extern char *COLLISIONInterrupt;
 extern bool CollisionFound;
+extern char *STCollisionInterrupt;
+extern bool STCollisionFound;
+extern int sprite_hit_st;
+extern int st_which_collided;
 
 /* ============================================================================
  * External variables - Transparency and color mapping
@@ -410,6 +436,7 @@ void closeall3d(void);
  * Function declarations - Sprite operations
  * ============================================================================ */
 void closeallsprites(void);
+void closeallstobjects(void);
 void closeframebuffer(char layer);
 
 /* ============================================================================

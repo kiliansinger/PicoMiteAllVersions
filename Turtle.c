@@ -86,34 +86,59 @@ const uint8_t fill_patterns[][8] = {
     {0x3C, 0x42, 0x81, 0x81, 0x81, 0x81, 0x42, 0x3C}, // 30: Circle
     {0x7E, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x7E}, // 31: Circle filled
 };
-static TurtleState turtle = {
-    .x = silly_high, .y = silly_high, // Screen center
-    .heading = 0,
-    .pen_down = 1,
-    .pen_color = 0xFFFFFF,
-    .pen_width = 1,
-    .fill_color = 0xFFFFFF,
-    .fill_enabled = 0,
-    .fill_pattern = 0,
-    .visible = 1,
-    .cursor_size = 10,
-    .cursor_color = 0x00FF00,
-    .cursor_x = 0,
-    .cursor_y = 0,
-    .cursor_heading = 0,
-    .cursor_drawn = 0,
-    .has_buffer_support = 0, // Will be set on first call
-    .stack_ptr = 0,
-    .cursor_buffer = NULL,
-    .poly_count = 0,
-    .poly_recording = 0};
+static TurtleState *turtle = NULL; // Allocated dynamically on first use
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
+
+// Allocate turtle state using GetMemory
+static void turtle_allocate(void)
+{
+    if (turtle != NULL)
+        return; // Already allocated
+
+    turtle = (TurtleState *)GetMemory(sizeof(TurtleState));
+
+    // Initialize defaults
+    turtle->x = silly_high;
+    turtle->y = silly_high;
+    turtle->heading = 0;
+    turtle->pen_down = 1;
+    turtle->pen_color = 0xFFFFFF;
+    turtle->pen_width = 1;
+    turtle->fill_color = 0xFFFFFF;
+    turtle->fill_enabled = 0;
+    turtle->fill_pattern = 0;
+    turtle->visible = 1;
+    turtle->cursor_size = 10;
+    turtle->cursor_color = 0x00FF00;
+    turtle->cursor_x = 0;
+    turtle->cursor_y = 0;
+    turtle->cursor_heading = 0;
+    turtle->cursor_drawn = 0;
+    turtle->has_buffer_support = 0;
+    turtle->stack_ptr = 0;
+    turtle->cursor_buffer = NULL;
+    turtle->poly_count = 0;
+    turtle->poly_recording = 0;
+}
+
+// Free turtle state
+void turtle_free(void)
+{
+    if (turtle != NULL)
+    {
+        FreeMemorySafe((void **)&turtle->cursor_buffer);
+        FreeMemorySafe((void **)&turtle);
+    }
+}
+
 void turtle_init(bool nowrite)
 {
-    turtle_reset(&turtle, 0, nowrite);
+    if (turtle == NULL)
+        turtle_allocate();
+    turtle_reset(turtle, 0, nowrite);
 }
 
 static float normalize_heading(float heading)
@@ -751,113 +776,118 @@ void turtle_reset(TurtleState *t, bool showturtle, bool nowrite)
 void cmd_turtle(void)
 {
     unsigned char *tp;
+    if (turtle == NULL)
+    {
+        turtle_allocate();
+        turtle_reset(turtle, 0, 0);
+    }
     if ((tp = checkstring(cmdline, (unsigned char *)"FORWARD")) || (tp = checkstring(cmdline, (unsigned char *)"FD")))
     {
-        turtle_forward(&turtle, getnumber(tp));
+        turtle_forward(turtle, getnumber(tp));
     }
     else if ((tp = checkstring(cmdline, (unsigned char *)"BACK")) || (tp = checkstring(cmdline, (unsigned char *)"BACKWARD")) || (tp = checkstring(cmdline, (unsigned char *)"BK")))
     {
-        turtle_forward(&turtle, -getnumber(tp));
+        turtle_forward(turtle, -getnumber(tp));
     }
     else if ((tp = checkstring(cmdline, (unsigned char *)"RIGHT")) || (tp = checkstring(cmdline, (unsigned char *)"TURN RIGHT")) || (tp = checkstring(cmdline, (unsigned char *)"RT")))
     {
         getcsargs(&tp, 1);
         if (argc == 1)
-            turtle.heading += getnumber(tp);
+            turtle->heading += getnumber(tp);
         else
-            turtle.heading += 90;
-        turtle.heading = normalize_heading(turtle.heading);
-        draw_turtle_cursor(&turtle);
+            turtle->heading += 90;
+        turtle->heading = normalize_heading(turtle->heading);
+        draw_turtle_cursor(turtle);
     }
     else if ((tp = checkstring(cmdline, (unsigned char *)"LEFT")) || (tp = checkstring(cmdline, (unsigned char *)"TURN LEFT")) || (tp = checkstring(cmdline, (unsigned char *)"LT")))
     {
         getcsargs(&tp, 1);
         if (argc == 1)
-            turtle.heading -= getnumber(tp);
+            turtle->heading -= getnumber(tp);
         else
-            turtle.heading -= 90;
-        turtle.heading = normalize_heading(turtle.heading);
-        draw_turtle_cursor(&turtle);
+            turtle->heading -= 90;
+        turtle->heading = normalize_heading(turtle->heading);
+        draw_turtle_cursor(turtle);
     }
     else if ((tp = checkstring(cmdline, (unsigned char *)"PEN UP")) || (tp = checkstring(cmdline, (unsigned char *)"PENUP")) || (tp = checkstring(cmdline, (unsigned char *)"PU")))
     {
-        turtle.pen_down = 0;
+        turtle->pen_down = 0;
     }
     else if ((tp = checkstring(cmdline, (unsigned char *)"PEN DOWN")) || (tp = checkstring(cmdline, (unsigned char *)"PENDOWNU")) || (tp = checkstring(cmdline, (unsigned char *)"PD")))
     {
-        turtle.pen_down = 1;
+        turtle->pen_down = 1;
     }
     else if ((tp = checkstring(cmdline, (unsigned char *)"PEN COLOUR")) || (tp = checkstring(cmdline, (unsigned char *)"PENCOLOR")) || (tp = checkstring(cmdline, (unsigned char *)"PC")))
     {
-        turtle.pen_color = getint(tp, 0, 0xFFFFFF);
+        turtle->pen_color = getint(tp, 0, 0xFFFFFF);
     }
     else if ((tp = checkstring(cmdline, (unsigned char *)"PEN WIDTH")) || (tp = checkstring(cmdline, (unsigned char *)"PENWIDTH")) || (tp = checkstring(cmdline, (unsigned char *)"PW")))
     {
-        turtle.pen_width = getint(tp, 1, 50);
+        turtle->pen_width = getint(tp, 1, 50);
     }
     else if ((tp = checkstring(cmdline, (unsigned char *)"SET XY")) || (tp = checkstring(cmdline, (unsigned char *)"SETXY")) || (tp = checkstring(cmdline, (unsigned char *)"MOVE")))
     {
         getcsargs(&tp, 3);
         if (argc != 3)
             SyntaxError();
-        turtle_goto(&turtle, getnumber(argv[0]), getnumber(argv[2]));
+        turtle_goto(turtle, getnumber(argv[0]), getnumber(argv[2]));
     }
     else if ((tp = checkstring(cmdline, (unsigned char *)"SET X")) || (tp = checkstring(cmdline, (unsigned char *)"SETX")))
     {
-        turtle_goto(&turtle, getnumber(tp), turtle.y);
+        turtle_goto(turtle, getnumber(tp), turtle->y);
     }
     else if ((tp = checkstring(cmdline, (unsigned char *)"SET Y")) || (tp = checkstring(cmdline, (unsigned char *)"SETY")))
     {
-        turtle_goto(&turtle, turtle.x, getnumber(tp));
+        turtle_goto(turtle, turtle->x, getnumber(tp));
     }
     else if ((tp = checkstring(cmdline, (unsigned char *)"SET HEADING")) || (tp = checkstring(cmdline, (unsigned char *)"HEADING")) || (tp = checkstring(cmdline, (unsigned char *)"SETHEADING")) || (tp = checkstring(cmdline, (unsigned char *)"SETH")))
     {
-        turtle.heading = normalize_heading(getnumber(tp));
-        draw_turtle_cursor(&turtle);
+        turtle->heading = normalize_heading(getnumber(tp));
+        draw_turtle_cursor(turtle);
     }
     else if ((tp = checkstring(cmdline, (unsigned char *)"HOME")))
     {
-        turtle_goto(&turtle, HRes / 2, VRes / 2);
+        turtle_goto(turtle, HRes / 2, VRes / 2);
     }
     else if ((tp = checkstring(cmdline, (unsigned char *)"RESET")))
     {
         getcsargs(&tp, 1);
         if (argc == 1)
-            turtle_reset(&turtle, getint(tp, 0, 1), 0);
+            turtle_reset(turtle, getint(tp, 0, 1), 0);
         else
-            turtle_reset(&turtle, 0, 0);
+            turtle_reset(turtle, 0, 0);
     }
     else if ((tp = checkstring(cmdline, (unsigned char *)"ARC")))
     {
         getcsargs(&tp, 3);
         if (argc != 3)
             SyntaxError();
-        turtle_arc(&turtle, getnumber(argv[0]), getnumber(argv[2]));
+        turtle_arc(turtle, getnumber(argv[0]), getnumber(argv[2]));
     }
     else if ((tp = checkstring(cmdline, (unsigned char *)"ARCL")) || (tp = checkstring(cmdline, (unsigned char *)"ARCLEFT")) || (tp = checkstring(cmdline, (unsigned char *)"ARC LEFT")))
     {
         getcsargs(&tp, 3);
         if (argc != 3)
             SyntaxError();
-        turtle_arc(&turtle, getnumber(argv[0]), getnumber(argv[2]));
+        turtle_arc(turtle, getnumber(argv[0]), getnumber(argv[2]));
     }
     else if ((tp = checkstring(cmdline, (unsigned char *)"ARCR")) || (tp = checkstring(cmdline, (unsigned char *)"ARCRIGHT")) || (tp = checkstring(cmdline, (unsigned char *)"ARC RIGHT")))
     {
         getcsargs(&tp, 3);
         if (argc != 3)
             SyntaxError();
-        turtle_arc(&turtle, getnumber(argv[0]), -getnumber(argv[2]));
+        turtle_arc(turtle, getnumber(argv[0]), -getnumber(argv[2]));
     }
     else if ((tp = checkstring(cmdline, (unsigned char *)"BEZIER")))
     {
         getcsargs(&tp, 11);
         if (argc != 11)
             SyntaxError();
-        turtle_bezier(&turtle, getnumber(argv[0]), getnumber(argv[2]), getnumber(argv[4]), getnumber(argv[6]), getnumber(argv[8]), getnumber(argv[10]));
+        turtle_bezier(turtle, getnumber(argv[0]), getnumber(argv[2]), getnumber(argv[4]), getnumber(argv[6]), getnumber(argv[8]), getnumber(argv[10]));
     }
     else if ((tp = checkstring(cmdline, (unsigned char *)"CIRCLE")))
     {
-        DrawCircle((int)turtle.x, (int)turtle.y, getint(tp, 2, HRes / 2), 1, turtle.pen_color, -1, 1.0);
+        DrawCircle((int)turtle->x, (int)turtle->y, getint(tp, 2, HRes / 2), 1, turtle->pen_color, -1, 1.0);
     }
     else if ((tp = checkstring(cmdline, (unsigned char *)"DOT")))
     {
@@ -865,18 +895,18 @@ void cmd_turtle(void)
         int size = 5;
         if (argc)
             size = getint(argv[0], 1, HRes / 2);
-        DrawCircle((int)turtle.x, (int)turtle.y, size, 0, turtle.pen_color, turtle.pen_color, 1.0);
+        DrawCircle((int)turtle->x, (int)turtle->y, size, 0, turtle->pen_color, turtle->pen_color, 1.0);
     }
     else if ((tp = checkstring(cmdline, (unsigned char *)"FCIRCLE")))
     {
-        if (turtle.fill_enabled)
+        if (turtle->fill_enabled)
         {
-            DrawCircleFilled_Pattern((int)turtle.x, (int)turtle.y, getint(tp, 2, HRes / 2),
-                                     turtle.fill_color, turtle.fill_pattern);
+            DrawCircleFilled_Pattern((int)turtle->x, (int)turtle->y, getint(tp, 2, HRes / 2),
+                                     turtle->fill_color, turtle->fill_pattern);
         }
-        if (turtle.pen_down)
+        if (turtle->pen_down)
         {
-            DrawCircle((int)turtle.x, (int)turtle.y, getint(tp, 2, HRes / 2), 1, turtle.pen_color, -1, 1.0);
+            DrawCircle((int)turtle->x, (int)turtle->y, getint(tp, 2, HRes / 2), 1, turtle->pen_color, -1, 1.0);
         }
     }
     else if ((tp = checkstring(cmdline, (unsigned char *)"FRECTANGLE")) || (tp = checkstring(cmdline, (unsigned char *)"FRECT")))
@@ -886,22 +916,22 @@ void cmd_turtle(void)
             SyntaxError();
         int w = getint(argv[0], 1, HRes);
         int h = getint(argv[2], 1, VRes);
-        int x = (int)turtle.x - w / 2;
-        int y = (int)turtle.y - h / 2;
+        int x = (int)turtle->x - w / 2;
+        int y = (int)turtle->y - h / 2;
         int x1 = x + w - 1;
         int y1 = y + h - 1;
 
-        if (turtle.fill_enabled)
+        if (turtle->fill_enabled)
         {
             DrawRectangleFilled_Pattern(x, y, w, h,
-                                        turtle.fill_color, turtle.fill_pattern);
+                                        turtle->fill_color, turtle->fill_pattern);
         }
-        if (turtle.pen_down)
+        if (turtle->pen_down)
         {
-            DrawLine(x, y, x1, y, 1, turtle.pen_color);
-            DrawLine(x, y1, x1, y1, 1, turtle.pen_color);
-            DrawLine(x, y, x, y1, 1, turtle.pen_color);
-            DrawLine(x1, y, x1, y1, 1, turtle.pen_color);
+            DrawLine(x, y, x1, y, 1, turtle->pen_color);
+            DrawLine(x, y1, x1, y1, 1, turtle->pen_color);
+            DrawLine(x, y, x, y1, 1, turtle->pen_color);
+            DrawLine(x1, y, x1, y1, 1, turtle->pen_color);
         }
     }
     else if ((tp = checkstring(cmdline, (unsigned char *)"ARECTANGLE")) || (tp = checkstring(cmdline, (unsigned char *)"ARECT")))
@@ -909,104 +939,104 @@ void cmd_turtle(void)
         getcsargs(&tp, 3);
         if (argc != 3)
             SyntaxError();
-        turtle_rectangle(&turtle, getint(argv[0], 1, HRes), getint(argv[2], 1, VRes));
+        turtle_rectangle(turtle, getint(argv[0], 1, HRes), getint(argv[2], 1, VRes));
     }
     else if ((tp = checkstring(cmdline, (unsigned char *)"WEDGE")))
     {
         getcsargs(&tp, 5);
         if (argc != 5)
             SyntaxError();
-        turtle_wedge(&turtle, getnumber(argv[0]), getnumber(argv[2]), getnumber(argv[4]));
+        turtle_wedge(turtle, getnumber(argv[0]), getnumber(argv[2]), getnumber(argv[4]));
     }
     else if ((tp = checkstring(cmdline, (unsigned char *)"FILL COLOUR")) || (tp = checkstring(cmdline, (unsigned char *)"FILLCOLOR")) || (tp = checkstring(cmdline, (unsigned char *)"FC")))
     {
-        turtle.fill_color = getint(tp, 0, 0xFFFFFF);
-        turtle.fill_enabled = 1;
+        turtle->fill_color = getint(tp, 0, 0xFFFFFF);
+        turtle->fill_enabled = 1;
     }
     else if ((tp = checkstring(cmdline, (unsigned char *)"FILL PATTERN")) || (tp = checkstring(cmdline, (unsigned char *)"FILLPATTERN")) || (tp = checkstring(cmdline, (unsigned char *)"FP")))
     {
-        turtle.fill_pattern = getint(tp, 0, NUM_PATTERNS);
+        turtle->fill_pattern = getint(tp, 0, NUM_PATTERNS);
     }
     else if ((tp = checkstring(cmdline, (unsigned char *)"NOFILL")) || (tp = checkstring(cmdline, (unsigned char *)"NO FILL")))
     {
-        turtle.fill_enabled = 0;
+        turtle->fill_enabled = 0;
     }
     else if ((tp = checkstring(cmdline, (unsigned char *)"BEGIN FILL")) || (tp = checkstring(cmdline, (unsigned char *)"BEGIN_FILL")) || (tp = checkstring(cmdline, (unsigned char *)"BF")))
     {
-        turtle.poly_count = 0;
-        turtle.poly_recording = 1;
-        turtle.poly_points_x[turtle.poly_count] = (int)turtle.x;
-        turtle.poly_points_y[turtle.poly_count] = (int)turtle.y;
-        turtle.poly_count++;
+        turtle->poly_count = 0;
+        turtle->poly_recording = 1;
+        turtle->poly_points_x[turtle->poly_count] = (int)turtle->x;
+        turtle->poly_points_y[turtle->poly_count] = (int)turtle->y;
+        turtle->poly_count++;
     }
     else if ((tp = checkstring(cmdline, (unsigned char *)"END FILL")) || (tp = checkstring(cmdline, (unsigned char *)"END_FILL")) || (tp = checkstring(cmdline, (unsigned char *)"EF")))
     {
-        turtle.poly_recording = 0;
-        if (turtle.poly_count > 2)
+        turtle->poly_recording = 0;
+        if (turtle->poly_count > 2)
         {
-            draw_filled_polygon(&turtle);
+            draw_filled_polygon(turtle);
         }
-        turtle.poly_count = 0;
+        turtle->poly_count = 0;
     }
     else if ((tp = checkstring(cmdline, (unsigned char *)"PUSH")))
     {
-        if (turtle.stack_ptr < 16)
+        if (turtle->stack_ptr < 16)
         {
-            turtle.stack_x[turtle.stack_ptr] = turtle.x;
-            turtle.stack_y[turtle.stack_ptr] = turtle.y;
-            turtle.stack_heading[turtle.stack_ptr] = turtle.heading;
-            turtle.stack_ptr++;
+            turtle->stack_x[turtle->stack_ptr] = turtle->x;
+            turtle->stack_y[turtle->stack_ptr] = turtle->y;
+            turtle->stack_heading[turtle->stack_ptr] = turtle->heading;
+            turtle->stack_ptr++;
         }
     }
     else if ((tp = checkstring(cmdline, (unsigned char *)"POP")))
     {
-        if (turtle.stack_ptr > 0)
+        if (turtle->stack_ptr > 0)
         {
-            turtle.stack_ptr--;
-            turtle_goto(&turtle, turtle.stack_x[turtle.stack_ptr],
-                        turtle.stack_y[turtle.stack_ptr]);
-            turtle.heading = turtle.stack_heading[turtle.stack_ptr];
+            turtle->stack_ptr--;
+            turtle_goto(turtle, turtle->stack_x[turtle->stack_ptr],
+                        turtle->stack_y[turtle->stack_ptr]);
+            turtle->heading = turtle->stack_heading[turtle->stack_ptr];
         }
     }
     else if ((tp = checkstring(cmdline, (unsigned char *)"SHOW TURTLE")) || (tp = checkstring(cmdline, (unsigned char *)"SHOWTURTLE")) || (tp = checkstring(cmdline, (unsigned char *)"ST")))
     {
-        turtle.visible = 1;
-        draw_turtle_cursor(&turtle);
+        turtle->visible = 1;
+        draw_turtle_cursor(turtle);
     }
     else if ((tp = checkstring(cmdline, (unsigned char *)"HIDE TURTLE")) || (tp = checkstring(cmdline, (unsigned char *)"HIDETURTLE")) || (tp = checkstring(cmdline, (unsigned char *)"HT")))
     {
-        turtle.visible = 0;
-        if (turtle.cursor_drawn)
+        turtle->visible = 0;
+        if (turtle->cursor_drawn)
         {
-            erase_turtle_cursor(&turtle);
+            erase_turtle_cursor(turtle);
         }
     }
     else if ((tp = checkstring(cmdline, (unsigned char *)"CURSOR SIZE")) || (tp = checkstring(cmdline, (unsigned char *)"CURSORSIZE")) || (tp = checkstring(cmdline, (unsigned char *)"CS")))
     {
-        turtle.cursor_size = getint(tp, 5, MAX_CURSOR_SIZE);
-        if (turtle.visible)
+        turtle->cursor_size = getint(tp, 5, MAX_CURSOR_SIZE);
+        if (turtle->visible)
         {
-            draw_turtle_cursor(&turtle);
+            draw_turtle_cursor(turtle);
         }
     }
     else if ((tp = checkstring(cmdline, (unsigned char *)"CURSOR COLOUR")) || (tp = checkstring(cmdline, (unsigned char *)"CURSORCOLOR")) || (tp = checkstring(cmdline, (unsigned char *)"CC")))
     {
-        turtle.cursor_color = getint(tp, 0, 0xFFFFFF);
-        if (turtle.visible)
+        turtle->cursor_color = getint(tp, 0, 0xFFFFFF);
+        if (turtle->visible)
         {
-            draw_turtle_cursor(&turtle);
+            draw_turtle_cursor(turtle);
         }
     }
     else if ((tp = checkstring(cmdline, (unsigned char *)"STAMP")))
     {
         int or = 0; // default orientation is up
-        int xp = turtle.x;
-        int yp = turtle.y;
-        if (turtle.heading > 45 && turtle.heading <= 135)
+        int xp = turtle->x;
+        int yp = turtle->y;
+        if (turtle->heading > 45 && turtle->heading <= 135)
             or = 90;
-        if (turtle.heading > 135 && turtle.heading <= 225)
+        if (turtle->heading > 135 && turtle->heading <= 225)
             or = 180;
-        if (turtle.heading > 225 && turtle.heading <= 315)
+        if (turtle->heading > 225 && turtle->heading <= 315)
             or = 270;
 
         int tpos = 0;

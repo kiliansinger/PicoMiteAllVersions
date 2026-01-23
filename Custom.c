@@ -749,7 +749,7 @@ void MIPS16 cmd_pio(void)
                 uint32_t s_nbr = nbr;
                 static uint32_t *a1int = NULL;
                 int64_t *aint = NULL;
-                int toarraysize = parseintegerarray(argv[6], &aint, 4, 1, dims, true);
+                int toarraysize = parseintegerarray(argv[6], &aint, 4, 1, dims, true, NULL);
                 a1int = (uint32_t *)aint;
                 if (argc >= 9 && *argv[8])
                 {
@@ -862,7 +862,7 @@ void MIPS16 cmd_pio(void)
                 uint32_t nbr = getint(argv[4], 0, 0xFFFFFFFF);
                 static uint32_t *a1int = NULL;
                 //                int64_t *aint = NULL;
-                //                int toarraysize = parseintegerarray(argv[6], &aint, 4, 1, dims, true);
+                //                int toarraysize = parseintegerarray(argv[6], &aint, 4, 1, dims, true, NULL);
                 //                if ((toarraysize << 1) < nbr)
                 //                        StandardError(17);
                 a1int = (uint32_t *)(uint32_t)getint(argv[6], 0, 0xFFFFFFFF);
@@ -917,7 +917,7 @@ void MIPS16 cmd_pio(void)
 
                 static uint32_t *a1int = NULL;
                 int64_t *aint = NULL;
-                int toarraysize = parseintegerarray(argv[6], &aint, 4, 1, dims, true);
+                int toarraysize = parseintegerarray(argv[6], &aint, 4, 1, dims, true, NULL);
                 a1int = (uint32_t *)aint;
 
                 // Get optional size parameter (argc == 13)
@@ -1194,6 +1194,7 @@ void MIPS16 cmd_pio(void)
                 int sm = getint(argv[2], 0, 3);
                 nbr = getinteger(argv[4]);
                 dd = findvar(argv[6], V_FIND | V_EMPTY_OK | V_NOFIND_ERR);
+                CHECK_STRUCT_MEMBER_ARRAY();  // Struct member arrays not supported here
                 if (((g_vartbl[g_VarIndex].type & T_INT) && g_vartbl[g_VarIndex].dims[0] > 0 && g_vartbl[g_VarIndex].dims[1] == 0))
                 { // integer array
                         if ((((long long int *)dd - g_vartbl[g_VarIndex].val.ia) + nbr) > (g_vartbl[g_VarIndex].dims[0] + 1 - g_OptionBase))
@@ -2253,7 +2254,7 @@ void MIPS16 cmd_pio(void)
 #else
                 PIO pio = (pior == 0 ? pio0 : pio1);
 #endif
-                int toarraysize = parseintegerarray(argv[2], &a1int, 2, 1, dims, true);
+                int toarraysize = parseintegerarray(argv[2], &a1int, 2, 1, dims, true, NULL);
                 if (toarraysize != 8)
                         StandardError(17);
                 program.instructions = (const uint16_t *)a1int;
@@ -3031,6 +3032,7 @@ void cmd_web(void)
                 if (*tp)
                 {
                         ptr1 = findvar(tp, V_FIND | V_EMPTY_OK);
+                        CHECK_STRUCT_MEMBER_ARRAY();  // Struct member arrays not supported here
                         if (g_vartbl[g_VarIndex].type & T_INT)
                         {
                                 if (g_vartbl[g_VarIndex].dims[1] != 0)
@@ -3111,6 +3113,7 @@ void fun_json(void)
         getcsargs(&ep, 3);
         char *a = GetTempStrMemory();
         ptr1 = findvar(argv[0], V_FIND | V_EMPTY_OK);
+        CHECK_STRUCT_MEMBER_ARRAY();  // Struct member arrays not supported here
         if (g_vartbl[g_VarIndex].type & T_INT)
         {
                 if (g_vartbl[g_VarIndex].dims[1] != 0)

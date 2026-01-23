@@ -1858,7 +1858,7 @@ static DRFLAC_INLINE drflac_uint32 drflac__swap_endian_uint32(drflac_uint32 n)
             #if defined(DRFLAC_64BIT)
                 "rev %w[out], %w[in]" : [out]"=r"(r) : [in]"r"(n)   /* <-- This is untested. If someone in the community could test this, that would be appreciated! */
             #else
-                "rev %[out], %[in]" : [out]"=r"(r) : [in]"r"(n)
+                "rev %[out], %[in]" : [out]"=l"(r) : [in]"l"(n)   /* Use low registers (r0-r7) for Thumb compatibility */
             #endif
             );
             return r;

@@ -560,6 +560,9 @@ extern void waitwhilebusy(void);
 extern void SetAndReserve(int pin, int inp, int init, int type);
 extern void OpenSpiChannel(void);
 extern void ClearCS(int pin);
+#if PICOMITERP2350
+extern void __not_in_flash_func(ClearCS)(int pin);
+#endif
 extern void set_cs(void);
 extern void SetCS(void);
 extern void ResetController(void);
@@ -633,6 +636,11 @@ extern void ScrollLCDMEM332(int lines);
 extern void init_RGB332_to_RGB565_LUT(void);
 extern void init_RGB332_to_RGB888_LUT(void);
 extern void init_RGB332_to_RGB888_LUT_SSD(void);
+// Optional RAM-resident specs for flash-safe paths when running on core1
+extern void __not_in_flash_func(init_RGB332_to_RGB565_LUT)(void);
+extern void __not_in_flash_func(init_RGB332_to_RGB888_LUT)(void);
+extern void __not_in_flash_func(init_RGB332_to_RGB888_LUT_SSD)(void);
+extern void __not_in_flash_func(rgb332_to_rgb888)(uint8_t rgb332, uint8_t *r, uint8_t *g, uint8_t *b);
 #endif
 
 /* ==============================================================================================================

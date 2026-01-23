@@ -62,8 +62,8 @@ unsigned char *FRAMEBUFFER = NULL;
 #endif
 #else
 #ifdef PICOMITEVGA
+unsigned char __attribute__((aligned(4096))) Heap[HEAP_MEMORY_SIZE + 256] = {0};
 unsigned char __attribute__((aligned(256))) video[640 * 480 / 8];
-unsigned char __attribute__((aligned(4096))) Heap[HEAP_MEMORY_SIZE + 256];
 unsigned char *FRAMEBUFFER = video;
 uint32_t framebuffersize = 640 * 480 / 8;
 unsigned char *MMHeap = Heap;
@@ -120,8 +120,7 @@ unsigned char *LayerBuf = NULL;
 unsigned char *FrameBuf = NULL;
 #endif
 #ifdef GUICONTROLS
-struct s_ctrl CTRLS[MAXCONTROLS];
-struct s_ctrl *Ctrl = CTRLS;
+struct s_ctrl *Ctrl = NULL; // Allocated from heap top when Option.MaxCtrls > 0
 #endif
 #ifdef PICOMITEWEB
 unsigned char *WriteBuf = NULL;
@@ -170,7 +169,7 @@ void MIPS16 cmd_memory(void)
         uint64_t *from = NULL;
         if (CheckEmpty((char *)argv[0]))
         {
-            sourcesize = parseintegerarray(argv[0], (int64_t **)&from, 1, 1, NULL, false);
+            sourcesize = parseintegerarray(argv[0], (int64_t **)&from, 1, 1, NULL, false, NULL);
             if (sourcesize < n)
                 error("Source array too small");
         }
@@ -178,7 +177,7 @@ void MIPS16 cmd_memory(void)
             from = (uint64_t *)GetPokeAddr(argv[0]);
         if (CheckEmpty((char *)argv[2]))
         {
-            destinationsize = parseintegerarray(argv[2], (int64_t **)&top, 2, 1, NULL, true);
+            destinationsize = parseintegerarray(argv[2], (int64_t **)&top, 2, 1, NULL, true, NULL);
             if (destinationsize * 64 / size < n)
                 StandardError(23);
         }
@@ -261,7 +260,7 @@ void MIPS16 cmd_memory(void)
         int n = getinteger(argv[2]);
         if (CheckEmpty((char *)argv[4]))
         {
-            sourcesize = parseintegerarray(argv[4], &aint, 3, 1, NULL, false);
+            sourcesize = parseintegerarray(argv[4], &aint, 3, 1, NULL, false, NULL);
             if (sourcesize * 8 < n)
                 error("Source array too small");
             fromp = (char *)aint;
@@ -294,7 +293,7 @@ void MIPS16 cmd_memory(void)
         int n = getinteger(argv[2]);
         if (CheckEmpty((char *)argv[4]))
         {
-            sourcesize = parseintegerarray(argv[4], &aint, 3, 1, NULL, false);
+            sourcesize = parseintegerarray(argv[4], &aint, 3, 1, NULL, false, NULL);
             if (sourcesize * 8 < n)
                 error("Source array too small");
             fromp = (char *)aint;
@@ -332,7 +331,7 @@ void MIPS16 cmd_memory(void)
         void *fromp = NULL;
         if (CheckEmpty((char *)argv[0]))
         {
-            sourcesize = parseintegerarray(argv[0], (int64_t **)&fromp, 1, 1, NULL, false);
+            sourcesize = parseintegerarray(argv[0], (int64_t **)&fromp, 1, 1, NULL, false, NULL);
             if (sourcesize * 64 / size < n)
                 error("Source array too small");
         }
@@ -342,7 +341,7 @@ void MIPS16 cmd_memory(void)
         }
         if (CheckEmpty((char *)argv[2]))
         {
-            destinationsize = parseintegerarray(argv[2], (int64_t **)&to, 2, 1, NULL, true);
+            destinationsize = parseintegerarray(argv[2], (int64_t **)&to, 2, 1, NULL, true, NULL);
             if (n > destinationsize)
                 StandardError(23);
         }
@@ -1110,7 +1109,6 @@ void MIPS16 ClearSpecificTempMemory(void *addr)
         if (g_StrTmp[i] == addr)
         {
             FreeMemory(addr);
-            g_StrTmp[i] = NULL;
             g_StrTmpIndex--;
             while (i < g_StrTmpIndex)
             {
@@ -1118,6 +1116,7 @@ void MIPS16 ClearSpecificTempMemory(void *addr)
                 g_StrTmpLocalIndex[i] = g_StrTmpLocalIndex[i + 1];
                 i++;
             }
+            g_StrTmp[i] = NULL; // Clear the stale entry at end
             return;
         }
     }
@@ -1133,6 +1132,10 @@ void MIPS64 __not_in_flash_func(FreeMemory)(unsigned char *addr)
     {
         if (addr > (unsigned char *)PSRAMbase && addr < (unsigned char *)(PSRAMbase + PSRAMsize))
         {
+            // Validate the address is actually allocated before freeing
+            bits = SBitsGet(addr);
+            if (!(bits & PUSED))
+                return; // Address not allocated - nothing to free
             do
             {
                 bits = SBitsGet(addr);
@@ -1142,6 +1145,10 @@ void MIPS64 __not_in_flash_func(FreeMemory)(unsigned char *addr)
         }
         else
         {
+            // Validate the address is actually allocated before freeing
+            bits = MBitsGet(addr);
+            if (!(bits & PUSED))
+                return; // Address not allocated - nothing to free
             do
             {
                 bits = MBitsGet(addr);
@@ -1152,6 +1159,10 @@ void MIPS64 __not_in_flash_func(FreeMemory)(unsigned char *addr)
     }
     else
     {
+        // Validate the address is actually allocated before freeing
+        bits = MBitsGet(addr);
+        if (!(bits & PUSED))
+            return; // Address not allocated - nothing to free
         do
         {
             bits = MBitsGet(addr);
@@ -1161,6 +1172,10 @@ void MIPS64 __not_in_flash_func(FreeMemory)(unsigned char *addr)
     }
 #else
     int bits;
+    // Validate the address is actually allocated before freeing
+    bits = MBitsGet(addr);
+    if (!(bits & PUSED))
+        return; // Address not allocated - nothing to free
     do
     {
         bits = MBitsGet(addr);
@@ -1353,7 +1368,7 @@ void *GetAlignedMemory(int size)
             MBitsSet(addr, PUSED);
         }
         else
-            error("Not enough Aigned memory");
+            error("Not enough aligned memory");
     }
     addr -= PAGESIZE;
     MBitsSet(addr, PUSED | PLAST);

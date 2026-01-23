@@ -51,7 +51,7 @@ void i2cSendSlave(unsigned char *p, int channel);
 void i2cReceive(unsigned char *p);
 void i2c_disable(void);
 void i2c_enable(int bps);
-void i2c_masterCommand(int timer, unsigned char *buff);
+int i2c_masterCommand(int timer, unsigned char *buff, int update_global);
 void i2cCheck(unsigned char *p);
 void i2c2Enable(unsigned char *p);
 void i2c2Disable(unsigned char *p);
@@ -59,7 +59,7 @@ void i2c2Send(unsigned char *p);
 void i2c2Receive(unsigned char *p);
 void i2c2_disable(void);
 void i2c2_enable(int bps);
-void i2c2_masterCommand(int timer, unsigned char *buff);
+int i2c2_masterCommand(int timer, unsigned char *buff, int update_global);
 void i2c2Check(unsigned char *p);
 static MMFLOAT *I2C_Rcvbuf_Float;          // pointer to the master receive buffer for a MMFLOAT
 static long long int *I2C_Rcvbuf_Int;      // pointer to the master receive buffer for an integer
@@ -70,7 +70,7 @@ static volatile unsigned int I2C_Rcvlen;   // length of the master receive buffe
 static unsigned char I2C_Send_Buffer[256]; // I2C send buffer
 bool I2C_enabled = false;                  // I2C enable marker
 unsigned int I2C_Timeout;                  // master timeout value
-volatile unsigned int I2C_Status;          // status flags
+volatile unsigned int I2C_Status = 0;      // status flags
 int mmI2Cvalue;
 // value of MM.I2C
 static MMFLOAT *I2C2_Rcvbuf_Float;         // pointer to the master receive buffer for a MMFLOAT
@@ -80,9 +80,9 @@ static unsigned int I2C2_Addr;             // I2C device address
 static volatile unsigned int I2C2_Sendlen; // length of the master send buffer
 static volatile unsigned int I2C2_Rcvlen;  // length of the master receive buffer
 // static unsigned char I2C_Send_Buffer[256];                                   // I2C send buffer
-bool I2C2_enabled = false;         // I2C enable marker
-unsigned int I2C2_Timeout;         // master timeout value
-volatile unsigned int I2C2_Status; // status flags
+bool I2C2_enabled = false;             // I2C enable marker
+unsigned int I2C2_Timeout;             // master timeout value
+volatile unsigned int I2C2_Status = 0; // status flags
 // static char I2C_Rcv_Buffer[256];                                // I2C receive buffer
 static unsigned int I2C_Slave_Addr; // slave address
 char *I2C_Slave_Send_IntLine;       // pointer to the slave send interrupt line number
@@ -135,9 +135,10 @@ These are the functions responsible for executing the I2C related commands in MM
 They are supported by utility functions that are grouped at the end of this file
 
 ********************************************************************************************/
-void I2C_Send_Command(char command)
+int I2C_Send_Command(char command, int update_global)
 {
   int i2cret;
+  int status = 0;
   int i2caddr = SSD1306_I2C_Addr;
   I2C_Send_Buffer[0] = 0;
   I2C_Send_Buffer[1] = command;
@@ -147,16 +148,18 @@ void I2C_Send_Command(char command)
     i2cret = i2c_write_timeout_us(i2c1, (uint8_t)i2caddr, (uint8_t *)I2C_Send_Buffer, I2C_Sendlen, false, I2C_Timeout * 1000);
   else
     i2cret = i2c_write_timeout_us(i2c0, (uint8_t)i2caddr, (uint8_t *)I2C_Send_Buffer, I2C_Sendlen, false, I2C_Timeout * 1000);
-  mmI2Cvalue = 0;
   if (i2cret == PICO_ERROR_GENERIC)
-    mmI2Cvalue = 1;
+    status = 1;
   if (i2cret == PICO_ERROR_TIMEOUT)
-    mmI2Cvalue = 2;
-  //	mmI2Cvalue=HAL_I2C_Master_Transmit(&hi2c1, (uint16_t)i2caddr, I2C_Send_Buffer, I2C_Sendlen, I2C_Timeout);
+    status = 2;
+  if (update_global)
+    mmI2Cvalue = status;
+  return status;
 }
-void I2C_Send_Data(unsigned char *data, int n)
+int I2C_Send_Data(unsigned char *data, int n, int update_global)
 {
   int i2cret;
+  int status = 0;
   int i, i2caddr = SSD1306_I2C_Addr;
   I2C_Sendlen = n + 1;
   I2C_Send_Buffer[0] = 0x40;
@@ -169,11 +172,13 @@ void I2C_Send_Data(unsigned char *data, int n)
     i2cret = i2c_write_timeout_us(i2c1, (uint8_t)i2caddr, (uint8_t *)I2C_Send_Buffer, I2C_Sendlen, false, I2C_Timeout * 1000);
   else
     i2cret = i2c_write_timeout_us(i2c0, (uint8_t)i2caddr, (uint8_t *)I2C_Send_Buffer, I2C_Sendlen, false, I2C_Timeout * 1000);
-  mmI2Cvalue = 0;
   if (i2cret == PICO_ERROR_GENERIC)
-    mmI2Cvalue = 1;
+    status = 1;
   if (i2cret == PICO_ERROR_TIMEOUT)
-    mmI2Cvalue = 2;
+    status = 2;
+  if (update_global)
+    mmI2Cvalue = status;
+  return status;
 }
 #ifndef PICOMITEVGA
 void ConfigDisplayI2C(unsigned char *p)
@@ -227,49 +232,49 @@ void InitDisplayI2C(int InitOnly)
   ReadBLITBuffer = ReadBufferMEM;
   DisplayHRes = display_details[Option.DISPLAY_TYPE].horizontal;
   DisplayVRes = display_details[Option.DISPLAY_TYPE].vertical;
-  I2C_Send_Command(0xAE); // DISPLAYOFF
+  I2C_Send_Command(0xAE, 1); // DISPLAYOFF
 
-  I2C_Send_Command(0xD5); // DISPLAYCLOCKDIV
-  I2C_Send_Command(0xF0); // the suggested ratio &H80
+  I2C_Send_Command(0xD5, 1); // DISPLAYCLOCKDIV
+  I2C_Send_Command(0xF0, 1); // the suggested ratio &H80
 
-  I2C_Send_Command(0xA8); // MULTIPLEX
+  I2C_Send_Command(0xA8, 1); // MULTIPLEX
   if (Option.DISPLAY_TYPE == SSD1306I2C)
-    I2C_Send_Command(0x3F);
+    I2C_Send_Command(0x3F, 1);
   else if (Option.DISPLAY_TYPE == SSD1306I2C32)
-    I2C_Send_Command(0x1F);
+    I2C_Send_Command(0x1F, 1);
 
-  I2C_Send_Command(0xD3); // DISPLAYOFFSET
-  I2C_Send_Command(0x0);  // no offset
+  I2C_Send_Command(0xD3, 1); // DISPLAYOFFSET
+  I2C_Send_Command(0x0, 1);  // no offset
 
-  I2C_Send_Command(0x40); // STARTLINE
+  I2C_Send_Command(0x40, 1); // STARTLINE
 
-  I2C_Send_Command(0x8D); // CHARGEPUMP
-  I2C_Send_Command(0x14);
+  I2C_Send_Command(0x8D, 1); // CHARGEPUMP
+  I2C_Send_Command(0x14, 1);
 
-  I2C_Send_Command(0x20); // MEMORYMODE
-  I2C_Send_Command(0x00); //&H0 act like ks0108
+  I2C_Send_Command(0x20, 1); // MEMORYMODE
+  I2C_Send_Command(0x00, 1); //&H0 act like ks0108
 
-  I2C_Send_Command(0xA1); // SEGREMAP OR 1
-  I2C_Send_Command(0xC8); // COMSCANDEC
+  I2C_Send_Command(0xA1, 1); // SEGREMAP OR 1
+  I2C_Send_Command(0xC8, 1); // COMSCANDEC
 
-  I2C_Send_Command(0xDA); // COMPINS
+  I2C_Send_Command(0xDA, 1); // COMPINS
   if (Option.DISPLAY_TYPE == SSD1306I2C)
-    I2C_Send_Command(0x12);
+    I2C_Send_Command(0x12, 1);
   else if (Option.DISPLAY_TYPE == SSD1306I2C32)
-    I2C_Send_Command(0x02);
+    I2C_Send_Command(0x02, 1);
 
-  I2C_Send_Command(0x81); // SETCONTRAST
-  I2C_Send_Command(0xCF);
+  I2C_Send_Command(0x81, 1); // SETCONTRAST
+  I2C_Send_Command(0xCF, 1);
 
-  I2C_Send_Command(0xd9); // SETPRECHARGE
-  I2C_Send_Command(0x22);
+  I2C_Send_Command(0xd9, 1); // SETPRECHARGE
+  I2C_Send_Command(0x22, 1);
 
-  I2C_Send_Command(0xDB); // VCOMDETECT
-  I2C_Send_Command(0x20);
+  I2C_Send_Command(0xDB, 1); // VCOMDETECT
+  I2C_Send_Command(0x20, 1);
 
-  I2C_Send_Command(0xA4); // DISPLAYALLON_RESUME
-  I2C_Send_Command(0xA6); // NORMALDISPLAY
-  I2C_Send_Command(0xAF); // DISPLAYON
+  I2C_Send_Command(0xA4, 1); // DISPLAYALLON_RESUME
+  I2C_Send_Command(0xA6, 1); // NORMALDISPLAY
+  I2C_Send_Command(0xAF, 1); // DISPLAYON
   if (Option.DISPLAY_ORIENTATION & 1)
   {
     VRes = DisplayVRes;
@@ -461,24 +466,147 @@ void i2c2Slave(unsigned char *p)
 }
 int DoRtcI2C(int addr, unsigned char *buff)
 {
+  int status;
   if (I2C0locked)
   {
-    I2C_Addr = addr; // address of the device
-    i2c_masterCommand(1, buff);
+    I2C_Addr = addr;                        // address of the device
+    status = i2c_masterCommand(1, buff, 0); // Background operation - don't update mmI2Cvalue
   }
   else
   {
-    I2C2_Addr = addr; // address of the device
-    i2c2_masterCommand(1, buff);
+    I2C2_Addr = addr;                        // address of the device
+    status = i2c2_masterCommand(1, buff, 0); // Background operation - don't update mmI2Cvalue
   }
-  return !mmI2Cvalue;
+  return !status;
 }
+
+/**
+ * @brief Attempt to recover a stuck I2C bus
+ *
+ * This function attempts to recover an I2C bus that is stuck due to a slave
+ * holding SDA or SCL low (e.g., after a timeout during clock stretching).
+ *
+ * Recovery procedure:
+ * 1. Disable I2C peripheral
+ * 2. Configure SCL as GPIO output, SDA as GPIO input
+ * 3. Clock out up to 9 SCL pulses until SDA goes high
+ * 4. Generate a STOP condition manually
+ * 5. Re-initialize I2C peripheral
+ *
+ * @param i2c_num 0 for I2C0, 1 for I2C1
+ * @param baudrate Baudrate to restore (100000, 400000, or 1000000)
+ * @return 1 if recovery successful (SDA released), 0 if bus still stuck
+ */
+int i2c_bus_recovery(int i2c_num, int baudrate)
+{
+  uint8_t sda_pin, scl_pin;
+  uint8_t sda_gpio, scl_gpio;
+  i2c_inst_t *i2c;
+
+  // Get the correct pins and I2C instance
+  if (i2c_num == 0)
+  {
+    sda_pin = I2C0SDApin;
+    scl_pin = I2C0SCLpin;
+    i2c = i2c0;
+  }
+  else
+  {
+    sda_pin = I2C1SDApin;
+    scl_pin = I2C1SCLpin;
+    i2c = i2c1;
+  }
+
+  // Get actual GPIO numbers
+  sda_gpio = PinDef[sda_pin].GPno;
+  scl_gpio = PinDef[scl_pin].GPno;
+
+  // Step 1: Disable I2C peripheral
+  i2c->hw->enable = 0;
+
+  // Step 2: Configure pins as GPIO
+  gpio_init(scl_gpio);
+  gpio_init(sda_gpio);
+
+  // SCL as output (high), SDA as input with pull-up
+  gpio_set_dir(scl_gpio, GPIO_OUT);
+  gpio_put(scl_gpio, 1);
+
+  gpio_set_dir(sda_gpio, GPIO_IN);
+  gpio_pull_up(sda_gpio);
+
+  // Brief delay to let pull-up take effect
+  uSec(10);
+
+  // Check if SCL is being held low (clock stretching)
+  // If so, we can't do much - the slave is in control
+  if (!gpio_get(scl_gpio))
+  {
+    // SCL is stuck low - can't recover via clocking
+    // Just restore I2C and report failure
+    gpio_set_function(sda_gpio, GPIO_FUNC_I2C);
+    gpio_set_function(scl_gpio, GPIO_FUNC_I2C);
+    gpio_pull_up(sda_gpio);
+    gpio_pull_up(scl_gpio);
+    i2c_init(i2c, baudrate);
+    return 0;
+  }
+
+  // Step 3: Clock out up to 9 SCL pulses until SDA goes high
+  // A stuck slave is mid-byte; clocking SCL lets it finish
+  int recovered = 0;
+  for (int i = 0; i < 9; i++)
+  {
+    if (gpio_get(sda_gpio))
+    {
+      // SDA is high - slave has released the bus
+      recovered = 1;
+      break;
+    }
+    // Clock pulse: high -> low -> high
+    gpio_put(scl_gpio, 0);
+    uSec(5); // Half period at ~100KHz
+    gpio_put(scl_gpio, 1);
+    uSec(5);
+  }
+
+  // Step 4: Generate STOP condition (SDA low->high while SCL high)
+  // First ensure SCL is high
+  gpio_put(scl_gpio, 1);
+  uSec(5);
+
+  // Configure SDA as output
+  gpio_set_dir(sda_gpio, GPIO_OUT);
+
+  // SDA low
+  gpio_put(sda_gpio, 0);
+  uSec(5);
+
+  // SCL high (already high, but ensure it)
+  gpio_put(scl_gpio, 1);
+  uSec(5);
+
+  // SDA high while SCL high = STOP condition
+  gpio_put(sda_gpio, 1);
+  uSec(5);
+
+  // Step 5: Re-initialize I2C peripheral
+  gpio_set_function(sda_gpio, GPIO_FUNC_I2C);
+  gpio_set_function(scl_gpio, GPIO_FUNC_I2C);
+  gpio_pull_up(sda_gpio);
+  gpio_pull_up(scl_gpio);
+  i2c_init(i2c, baudrate);
+
+  return recovered;
+}
+
 #ifndef USBKEYBOARD
 void CheckI2CKeyboard(int noerror, int read)
 {
   uint16_t buff;
   //	int readover=0;
   static int ctrlheld = 0;
+
   //	while(readover==0){
   if (I2C0locked)
   {
@@ -682,12 +810,14 @@ static int RtcReadTime(char *buff)
   {
     I2C_Sendlen = 1;
     I2C_Rcvlen = 0;
+    I2C_Status = 0;
     I2C_Send_Buffer[0] = active_rtc->reg_start;
   }
   else
   {
     I2C2_Sendlen = 1;
     I2C2_Rcvlen = 0;
+    I2C2_Status = 0;
     I2C_Send_Buffer[0] = active_rtc->reg_start;
   }
   if (!DoRtcI2C(active_rtc->address, NULL))
@@ -754,11 +884,13 @@ static int RtcWriteTime(int year, int month, int day, int hour, int minute, int 
     {
       I2C_Sendlen = 8;
       I2C_Rcvlen = 0;
+      I2C_Status = 0;
     }
     else
     {
       I2C2_Sendlen = 8;
       I2C2_Rcvlen = 0;
+      I2C2_Status = 0;
     }
   }
   else if (active_rtc->type == RTC_PCF8563)
@@ -778,11 +910,13 @@ static int RtcWriteTime(int year, int month, int day, int hour, int minute, int 
     {
       I2C_Sendlen = 10;
       I2C_Rcvlen = 0;
+      I2C_Status = 0;
     }
     else
     {
       I2C2_Sendlen = 10;
       I2C2_Rcvlen = 0;
+      I2C2_Status = 0;
     }
   }
   else if (active_rtc->type == RTC_RV3028)
@@ -800,11 +934,13 @@ static int RtcWriteTime(int year, int month, int day, int hour, int minute, int 
     {
       I2C_Sendlen = 8;
       I2C_Rcvlen = 0;
+      I2C_Status = 0;
     }
     else
     {
       I2C2_Sendlen = 8;
       I2C2_Rcvlen = 0;
+      I2C2_Status = 0;
     }
   }
 
@@ -821,12 +957,14 @@ static int RtcReadRegister(uint8_t reg, uint8_t *value)
   {
     I2C_Sendlen = 1;
     I2C_Rcvlen = 0;
+    I2C_Status = 0;
     I2C_Send_Buffer[0] = reg;
   }
   else
   {
     I2C2_Sendlen = 1;
     I2C2_Rcvlen = 0;
+    I2C2_Status = 0;
     I2C_Send_Buffer[0] = reg;
   }
   if (!DoRtcI2C(active_rtc->address, NULL))
@@ -867,11 +1005,13 @@ static int RtcWriteRegister(uint8_t reg, uint8_t value)
   {
     I2C_Sendlen = 2;
     I2C_Rcvlen = 0;
+    I2C_Status = 0;
   }
   else
   {
     I2C2_Sendlen = 2;
     I2C2_Rcvlen = 0;
+    I2C2_Status = 0;
   }
 
   return DoRtcI2C(active_rtc->address, NULL);
@@ -1174,6 +1314,7 @@ void i2cSend(unsigned char *p)
     ptr = findvar(argv[6], V_NOFIND_NULL | V_EMPTY_OK);
     if (ptr == NULL)
       StandardError(6);
+    CHECK_STRUCT_MEMBER_ARRAY(); // Struct member arrays not supported here
     if ((g_vartbl[g_VarIndex].type & T_STR) && g_vartbl[g_VarIndex].dims[0] == 0)
     { // string
       if (sendlen > 255)
@@ -1219,7 +1360,7 @@ void i2cSend(unsigned char *p)
   I2C_Sendlen = sendlen;
   I2C_Rcvlen = 0;
 
-  i2c_masterCommand(1, NULL);
+  i2c_masterCommand(1, NULL, 1); // Foreground - update mmI2Cvalue
 }
 // send data to an I2C slave - master mode
 void i2cSendSlave(unsigned char *p, int channel)
@@ -1259,6 +1400,7 @@ void i2cSendSlave(unsigned char *p, int channel)
     ptr = findvar(argv[2], V_NOFIND_NULL | V_EMPTY_OK);
     if (ptr == NULL)
       StandardError(6);
+    CHECK_STRUCT_MEMBER_ARRAY(); // Struct member arrays not supported here
     if ((g_vartbl[g_VarIndex].type & T_STR) && g_vartbl[g_VarIndex].dims[0] == 0)
     { // string
       cptr = (unsigned char *)ptr;
@@ -1340,6 +1482,7 @@ void i2c2Send(unsigned char *p)
     ptr = findvar(argv[6], V_NOFIND_NULL | V_EMPTY_OK);
     if (ptr == NULL)
       StandardError(6);
+    CHECK_STRUCT_MEMBER_ARRAY(); // Struct member arrays not supported here
     if ((g_vartbl[g_VarIndex].type & T_STR) && g_vartbl[g_VarIndex].dims[0] == 0)
     { // string
       if (sendlen > 255)
@@ -1385,7 +1528,7 @@ void i2c2Send(unsigned char *p)
   I2C2_Sendlen = sendlen;
   I2C2_Rcvlen = 0;
 
-  i2c2_masterCommand(1, NULL);
+  i2c2_masterCommand(1, NULL, 1); // Foreground - update mmI2Cvalue
 }
 
 void i2cCheck(unsigned char *p)
@@ -1451,6 +1594,7 @@ void i2cReceive(unsigned char *p)
     StandardError(22);
   if (ptr == NULL)
     StandardError(6);
+  CHECK_STRUCT_MEMBER_ARRAY(); // Struct member arrays not supported here
   if (g_vartbl[g_VarIndex].type & T_NBR)
   {
     if (g_vartbl[g_VarIndex].dims[1] != 0)
@@ -1499,7 +1643,7 @@ void i2cReceive(unsigned char *p)
   I2C_Sendlen = 0;
   char *buff = GetTempMainMemory(rcvlen > 255 ? rcvlen + 2 : STRINGSIZE);
   //	PInt((uint32_t)I2C_Rcvbuf_String);
-  i2c_masterCommand(1, (unsigned char *)buff);
+  i2c_masterCommand(1, (unsigned char *)buff, 1); // Foreground - update mmI2Cvalue
   //	PIntComma(rcvlen);
   //	PInt((uint32_t)I2C_Rcvbuf_String);PRet();
   //	if(g_vartbl[g_VarIndex].type & T_STR)*(char *)ptr = rcvlen;
@@ -1530,6 +1674,7 @@ void i2cReceiveSlave(unsigned char *p, int channel)
     StandardError(22);
   if (ptr == NULL)
     StandardError(6);
+  CHECK_STRUCT_MEMBER_ARRAY(); // Struct member arrays not supported here
   if (g_vartbl[g_VarIndex].type & T_NBR)
   {
     if (g_vartbl[g_VarIndex].dims[1] != 0)
@@ -1665,6 +1810,7 @@ void i2c2Receive(unsigned char *p)
     StandardError(22);
   if (ptr == NULL)
     StandardError(6);
+  CHECK_STRUCT_MEMBER_ARRAY(); // Struct member arrays not supported here
   if (g_vartbl[g_VarIndex].type & T_NBR)
   {
     if (g_vartbl[g_VarIndex].dims[1] != 0)
@@ -1713,7 +1859,7 @@ void i2c2Receive(unsigned char *p)
   I2C2_Sendlen = 0;
 
   char *buff = GetTempMainMemory(rcvlen > 255 ? rcvlen + 2 : STRINGSIZE);
-  i2c2_masterCommand(1, (unsigned char *)buff);
+  i2c2_masterCommand(1, (unsigned char *)buff, 1); // Foreground - update mmI2Cvalue
 }
 
 /**************************************************************************************************
@@ -1771,7 +1917,7 @@ void i2c2_disable()
   {
     irq_set_enabled(I2C1_IRQ, false);
     irq_remove_handler(I2C1_IRQ, i2c1_irq_handler);
-    i2c_set_slave_mode(i2c1, false, I2C_Slave_Addr);
+    i2c_set_slave_mode(i2c1, false, I2C2_Slave_Addr);
     i2c1->hw->intr_mask = 0;
   }
   I2C2_Status = I2C_Status_Disable;
@@ -1792,27 +1938,27 @@ void i2c2_disable()
 /**************************************************************************************************
 Send and/or Receive data - master mode
 ***************************************************************************************************/
-void i2c_masterCommand(int timer, unsigned char *I2C_Rcv_Buffer)
+int i2c_masterCommand(int timer, unsigned char *I2C_Rcv_Buffer, int update_global)
 {
   //	unsigned char start_type,
+  int status = 0;
   unsigned char i2caddr = I2C_Addr;
   if (I2C_Sendlen)
   {
     int i2cret = i2c_write_timeout_us(i2c0, (uint8_t)i2caddr, (uint8_t *)I2C_Send_Buffer, I2C_Sendlen, (I2C_Status == I2C_Status_BusHold ? true : false), I2C_Timeout * 1000);
-    mmI2Cvalue = 0;
     if (i2cret == PICO_ERROR_GENERIC)
-      mmI2Cvalue = 1;
+      status = 1;
     if (i2cret == PICO_ERROR_TIMEOUT)
-      mmI2Cvalue = 2;
+      status = 2;
   }
   if (I2C_Rcvlen)
   {
     int i2cret = i2c_read_timeout_us(i2c0, (uint8_t)i2caddr, (uint8_t *)I2C_Rcv_Buffer, I2C_Rcvlen, (I2C_Status == I2C_Status_BusHold ? true : false), I2C_Timeout * 1000);
-    mmI2Cvalue = 0;
+    status = 0;
     if (i2cret == PICO_ERROR_GENERIC)
-      mmI2Cvalue = 1;
+      status = 1;
     if (i2cret == PICO_ERROR_TIMEOUT)
-      mmI2Cvalue = 2;
+      status = 2;
     for (int i = 0; i < I2C_Rcvlen; i++)
     {
       if (I2C_Rcvbuf_String != NULL)
@@ -1832,29 +1978,34 @@ void i2c_masterCommand(int timer, unsigned char *I2C_Rcv_Buffer)
       }
     }
   }
+  if (status)
+    I2C_Status = 0; // Clear bus hold on error
+  if (update_global)
+    mmI2Cvalue = status;
+  return status;
 }
 
-void i2c2_masterCommand(int timer, unsigned char *I2C2_Rcv_Buffer)
+int i2c2_masterCommand(int timer, unsigned char *I2C2_Rcv_Buffer, int update_global)
 {
   //	unsigned char start_type,
+  int status = 0;
   unsigned char i2c2addr = I2C2_Addr;
   if (I2C2_Sendlen)
   {
     int i2cret = i2c_write_timeout_us(i2c1, (uint8_t)i2c2addr, (uint8_t *)I2C_Send_Buffer, I2C2_Sendlen, (I2C2_Status == I2C_Status_BusHold ? true : false), I2C2_Timeout * 1000);
-    mmI2Cvalue = 0;
     if (i2cret == PICO_ERROR_GENERIC)
-      mmI2Cvalue = 1;
+      status = 1;
     if (i2cret == PICO_ERROR_TIMEOUT)
-      mmI2Cvalue = 2;
+      status = 2;
   }
   if (I2C2_Rcvlen)
   {
     int i2cret = i2c_read_timeout_us(i2c1, (uint8_t)i2c2addr, (uint8_t *)I2C2_Rcv_Buffer, I2C2_Rcvlen, (I2C2_Status == I2C_Status_BusHold ? true : false), I2C2_Timeout * 1000);
-    mmI2Cvalue = 0;
+    status = 0;
     if (i2cret == PICO_ERROR_GENERIC)
-      mmI2Cvalue = 1;
+      status = 1;
     if (i2cret == PICO_ERROR_TIMEOUT)
-      mmI2Cvalue = 2;
+      status = 2;
     for (int i = 0; i < I2C2_Rcvlen; i++)
     {
       if (I2C2_Rcvbuf_String != NULL)
@@ -1874,6 +2025,11 @@ void i2c2_masterCommand(int timer, unsigned char *I2C2_Rcv_Buffer)
       }
     }
   }
+  if (status)
+    I2C2_Status = 0; // Clear bus hold on error
+  if (update_global)
+    mmI2Cvalue = status;
+  return status;
 }
 /*  @endcond */
 
@@ -1886,28 +2042,35 @@ void fun_mmi2c(void)
  * @cond
  * The following section will be excluded from the documentation.
  */
-void GeneralSend(unsigned int addr, int nbr, char *p)
+int GeneralSend(unsigned int addr, int nbr, char *p, int update_global)
 {
+  int status;
+
   if (I2C0locked)
   {
     I2C_Sendlen = nbr; // send one byte
     I2C_Rcvlen = 0;
+    I2C_Status = 0;
     memcpy(I2C_Send_Buffer, p, nbr);
     I2C_Addr = addr; // address of the device
-    i2c_masterCommand(1, NULL);
+    status = i2c_masterCommand(1, NULL, update_global);
   }
   else
   {
     I2C2_Sendlen = nbr; // send one byte
     I2C2_Rcvlen = 0;
+    I2C2_Status = 0;
     memcpy(I2C_Send_Buffer, p, nbr);
     I2C2_Addr = addr; // address of the device
-    i2c2_masterCommand(1, NULL);
+    status = i2c2_masterCommand(1, NULL, update_global);
   }
+  return status;
 }
 
-void GeneralReceive(unsigned int addr, int nbr, char *p)
+int GeneralReceive(unsigned int addr, int nbr, char *p, int update_global)
 {
+  int status;
+
   if (I2C0locked)
   {
     I2C_Rcvbuf_Float = NULL;
@@ -1915,8 +2078,9 @@ void GeneralReceive(unsigned int addr, int nbr, char *p)
     I2C_Rcvbuf_String = NULL;
     I2C_Sendlen = 0; // send one byte
     I2C_Rcvlen = nbr;
+    I2C_Status = 0;
     I2C_Addr = addr; // address of the device
-    i2c_masterCommand(1, (unsigned char *)p);
+    status = i2c_masterCommand(1, (unsigned char *)p, update_global);
   }
   else
   {
@@ -1925,34 +2089,36 @@ void GeneralReceive(unsigned int addr, int nbr, char *p)
     I2C2_Rcvbuf_String = NULL;
     I2C2_Sendlen = 0; // send one byte
     I2C2_Rcvlen = nbr;
+    I2C2_Status = 0;
     I2C2_Addr = addr; // address of the device
-    i2c2_masterCommand(1, (unsigned char *)p);
+    status = i2c2_masterCommand(1, (unsigned char *)p, update_global);
   }
+  return status;
 }
-void WiiSend(int nbr, char *p)
+int WiiSend(int nbr, char *p)
 {
   unsigned int addr = nunaddr;
-  GeneralSend(addr, nbr, p);
+  return GeneralSend(addr, nbr, p, 0); // Background operation - don't update mmI2Cvalue
 }
 
-void WiiReceive(int nbr, char *p)
+int WiiReceive(int nbr, char *p)
 {
   unsigned int addr = nunaddr;
-  GeneralReceive(addr, nbr, p);
+  return GeneralReceive(addr, nbr, p, 0); // Background operation - don't update mmI2Cvalue
 }
 
 uint8_t readRegister8(unsigned int addr, uint8_t reg)
 {
   uint8_t buff;
-  GeneralSend(addr, 1, (char *)&reg);
-  GeneralReceive(addr, 1, (char *)&buff);
+  GeneralSend(addr, 1, (char *)&reg, 1);
+  GeneralReceive(addr, 1, (char *)&buff, 1);
   return buff;
 }
 uint32_t readRegister32(unsigned int addr, uint8_t reg)
 {
   uint32_t buff;
-  GeneralSend(addr, 1, (char *)&reg);
-  GeneralReceive(addr, 4, (char *)&buff);
+  GeneralSend(addr, 1, (char *)&reg, 1);
+  GeneralReceive(addr, 4, (char *)&buff, 1);
   return buff;
 }
 void WriteRegister8(unsigned int addr, uint8_t reg, uint8_t data)
@@ -1960,7 +2126,7 @@ void WriteRegister8(unsigned int addr, uint8_t reg, uint8_t data)
   uint8_t buff[2];
   buff[0] = reg;
   buff[1] = data;
-  GeneralSend(addr, 2, (char *)buff);
+  GeneralSend(addr, 2, (char *)buff, 1);
 }
 void Write8Register16(unsigned int addr, uint16_t reg, uint8_t data)
 {
@@ -1968,7 +2134,7 @@ void Write8Register16(unsigned int addr, uint16_t reg, uint8_t data)
   buff[0] = reg >> 8;
   buff[1] = reg & 0xFF;
   buff[2] = data;
-  GeneralSend(addr, 3, (char *)buff);
+  GeneralSend(addr, 3, (char *)buff, 1);
 }
 uint8_t read8Register16(unsigned int addr, uint16_t reg)
 {
@@ -1980,12 +2146,12 @@ uint8_t read8Register16(unsigned int addr, uint16_t reg)
     I2C_Status = I2C_Status_BusHold;
   else
     I2C2_Status = I2C_Status_BusHold;
-  GeneralSend(addr, 2, (char *)rbuff);
+  GeneralSend(addr, 2, (char *)rbuff, 1);
   if (I2C0locked)
     I2C_Status = 0;
   else
     I2C2_Status = 0;
-  GeneralReceive(addr, 1, (char *)&buff);
+  GeneralReceive(addr, 1, (char *)&buff, 1);
   return buff;
 }
 
@@ -2032,26 +2198,27 @@ void MIPS16 cmd_Nunchuck(void)
       StandardError(31);
     memset((void *)&nunstruct[5].x, 0, sizeof(nunstruct[5]));
     int retry = 5;
+    int status;
     do
     {
-      WiiSend(sizeof(nuninit), (char *)nuninit);
+      status = WiiSend(sizeof(nuninit), (char *)nuninit);
       uSec(5000);
-    } while (mmI2Cvalue && retry--);
-    if (mmI2Cvalue)
+    } while (status && retry--);
+    if (status)
       error("Nunchuck not connected");
-    WiiSend(sizeof(nuninit2), (char *)nuninit2);
-    if (mmI2Cvalue)
+    status = WiiSend(sizeof(nuninit2), (char *)nuninit2);
+    if (status)
       error("Nunchuck not connected");
     uSec(5000);
     retry = 5;
     do
     {
-      WiiSend(sizeof(nunid), (char *)nunid);
+      status = WiiSend(sizeof(nunid), (char *)nunid);
       uSec(5000);
-      WiiReceive(4, (char *)&id);
+      status = WiiReceive(4, (char *)&id);
       uSec(5000);
-    } while (mmI2Cvalue && retry--);
-    if (mmI2Cvalue)
+    } while (status && retry--);
+    if (status)
       error("Device ID not returned");
     nunstruct[5].type = swap32(id);
     if (nunstruct[5].type != 0xA4200000)
@@ -2102,26 +2269,27 @@ void MIPS16 cmd_Classic(void)
       StandardError(31);
     memset((void *)&nunstruct[0].x, 0, sizeof(nunstruct[0]));
     int retry = 5;
+    int status;
     do
     {
-      WiiSend(sizeof(nuninit), (char *)nuninit);
+      status = WiiSend(sizeof(nuninit), (char *)nuninit);
       uSec(5000);
-    } while (mmI2Cvalue && retry--);
-    if (mmI2Cvalue)
+    } while (status && retry--);
+    if (status)
       error("Classic not connected");
-    WiiSend(sizeof(nuninit2), (char *)nuninit2);
-    if (mmI2Cvalue)
+    status = WiiSend(sizeof(nuninit2), (char *)nuninit2);
+    if (status)
       error("Classic not connected");
     uSec(5000);
     retry = 5;
     do
     {
-      WiiSend(sizeof(nunid), (char *)nunid);
+      status = WiiSend(sizeof(nunid), (char *)nunid);
       uSec(5000);
-      WiiReceive(4, (char *)&id);
+      status = WiiReceive(4, (char *)&id);
       uSec(5000);
-    } while (mmI2Cvalue && retry--);
-    if (mmI2Cvalue)
+    } while (status && retry--);
+    if (status)
       error("Device ID not returned");
     nunstruct[0].type = swap32(id);
     if (nunstruct[0].type == 0xA4200000)
@@ -2251,17 +2419,17 @@ int readregister(int reg)
   {
     I2C_Sendlen = 1; // send one byte
     I2C_Rcvlen = 0;
-    *I2C_Send_Buffer = reg;    // the first register to read
-    I2C_Addr = ov7670_address; // address of the device
-    i2c_masterCommand(1, NULL);
+    *I2C_Send_Buffer = reg;        // the first register to read
+    I2C_Addr = ov7670_address;     // address of the device
+    i2c_masterCommand(1, NULL, 1); // Foreground - update mmI2Cvalue
   }
   else
   {
     I2C2_Sendlen = 1; // send one byte
     I2C2_Rcvlen = 0;
-    *I2C_Send_Buffer = reg;     // the first register to read
-    I2C2_Addr = ov7670_address; // address of the device
-    i2c2_masterCommand(1, NULL);
+    *I2C_Send_Buffer = reg;         // the first register to read
+    I2C2_Addr = ov7670_address;     // address of the device
+    i2c2_masterCommand(1, NULL, 1); // Foreground - update mmI2Cvalue
   }
   if (mmI2Cvalue)
   {
@@ -2275,8 +2443,8 @@ int readregister(int reg)
     I2C_Rcvbuf_Int = NULL;
     I2C_Rcvlen = 1; // get 7 bytes
     I2C_Sendlen = 0;
-    I2C_Addr = ov7670_address; // address of the device
-    i2c_masterCommand(1, buff);
+    I2C_Addr = ov7670_address;     // address of the device
+    i2c_masterCommand(1, buff, 1); // Foreground - update mmI2Cvalue
   }
   else
   {
@@ -2284,8 +2452,8 @@ int readregister(int reg)
     I2C2_Rcvbuf_Int = NULL;
     I2C2_Rcvlen = 1; // get 7 bytes
     I2C2_Sendlen = 0;
-    I2C2_Addr = ov7670_address; // address of the device
-    i2c2_masterCommand(1, buff);
+    I2C2_Addr = ov7670_address;     // address of the device
+    i2c2_masterCommand(1, buff, 1); // Foreground - update mmI2Cvalue
   }
   uSec(1000);
   return buff[0];
@@ -2298,19 +2466,19 @@ void ov7670_set(char a, char b)
   {
     I2C_Sendlen = 2; // send one byte
     I2C_Rcvlen = 0;
-    I2C_Send_Buffer[0] = a;    // the first register to read
-    I2C_Send_Buffer[1] = b;    // the first register to read
-    I2C_Addr = ov7670_address; // address of the device
-    i2c_masterCommand(1, NULL);
+    I2C_Send_Buffer[0] = a;        // the first register to read
+    I2C_Send_Buffer[1] = b;        // the first register to read
+    I2C_Addr = ov7670_address;     // address of the device
+    i2c_masterCommand(1, NULL, 1); // Foreground - update mmI2Cvalue
   }
   else
   {
     I2C2_Sendlen = 2; // send one byte
     I2C2_Rcvlen = 0;
-    I2C_Send_Buffer[0] = a;     // the first register to read
-    I2C_Send_Buffer[1] = b;     // the first register to read
-    I2C2_Addr = ov7670_address; // address of the device
-    i2c2_masterCommand(1, NULL);
+    I2C_Send_Buffer[0] = a;         // the first register to read
+    I2C_Send_Buffer[1] = b;         // the first register to read
+    I2C2_Addr = ov7670_address;     // address of the device
+    i2c2_masterCommand(1, NULL, 1); // Foreground - update mmI2Cvalue
   }
   if (mmI2Cvalue)
   {
@@ -2472,7 +2640,11 @@ void OV7670_set_size(OV7670_size size)
 #define ST_PCLK gpio_get(PCLKGP)
 #define ST_HREF gpio_get(HREFGP)
 #define ST_VSYNC gpio_get(VSYNCGP)
+#if LOWRAM
+void capture(char *buff)
+#else
 void __not_in_flash_func(capture)(char *buff)
+#endif
 {
   char *k = buff;
   while (ST_VSYNC)
@@ -2978,7 +3150,7 @@ void MIPS16 cmd_camera(void)
       error("Camera not open");
     int scale = 1;
     int64_t *aint;
-    size = parseintegerarray(argv[0], &aint, 1, 1, NULL, true);
+    size = parseintegerarray(argv[0], &aint, 1, 1, NULL, true, NULL);
     cp = (unsigned char *)aint;
     // get the two variables
     MMFLOAT *outdiff = findvar(argv[2], V_FIND);

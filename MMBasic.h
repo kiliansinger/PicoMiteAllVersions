@@ -56,17 +56,24 @@ extern "C"
  * Type definitions for data items
  * Used in tokens, variables and arguments to functions
  * ============================================================================ */
-#define T_NOTYPE 0x00   // type not set or discovered
-#define T_NBR 0x01      // number (or float) type
-#define T_STR 0x02      // string type
-#define T_INT 0x04      // 64 bit integer type
-#define T_PTR 0x08      // the variable points to another variable's data
-#define T_IMPLIED 0x10  // the variables type does not have to be specified with a suffix
-#define T_CONST 0x20    // the contents of this variable cannot be changed
-#define T_BLOCKED 0x40  // Hash table entry blocked after ERASE
-#define T_EXPLICIT 0x80 // Was the variable specified with a type suffix
-
+#define T_NOTYPE 0x00  // type not set or discovered
+#define T_NBR 0x01     // number (or float) type
+#define T_STR 0x02     // string type
+#define T_INT 0x04     // 64 bit integer type
+#define T_PTR 0x08     // the variable points to another variable's data
+#define T_IMPLIED 0x10 // the variables type does not have to be specified with a suffix
+#define T_CONST 0x20   // the contents of this variable cannot be changed
+#define T_BLOCKED 0x40 // Hash table entry blocked after ERASE
+#ifdef STRUCTENABLED
+#define T_STRUCT 0x80 // variable is a structure type
+#define TypeMask(a) ((a) & (T_NBR | T_INT | T_STR | T_STRUCT))
+#else
 #define TypeMask(a) ((a) & (T_NBR | T_INT | T_STR))
+#endif
+
+// namelen field in vartbl is used exclusively for flag bits (length no longer stored)
+#define NAMELEN_EXPLICIT 0x80 // Bit 7: variable had explicit type suffix ($, %, !)
+#define NAMELEN_STATIC 0x40   // Bit 6: static variable (dot in name is naming convention)
 
 /* ============================================================================
  * Token types
@@ -100,6 +107,22 @@ extern "C"
 #define V_LOCAL 0x1000       // create a local variable
 #define V_EMPTY_OK 0x2000    // allow an empty array variable. ie, var()
 #define V_FUNCT 0x4000       // we are defining the name of a function
+
+/* ============================================================================
+ * Struct member array protection macro
+ * Use after findvar() to error if struct member arrays are used where not supported
+ * ============================================================================ */
+#ifdef STRUCTENABLED
+#define CHECK_STRUCT_MEMBER_ARRAY()                                              \
+    do                                                                           \
+    {                                                                            \
+        if ((g_vartbl[g_VarIndex].type & T_STRUCT) && g_StructMemberType != 0 && \
+            g_vartbl[g_VarIndex].dims[0] > 0)                                    \
+            StandardError(47);                                                   \
+    } while (0)
+#else
+#define CHECK_STRUCT_MEMBER_ARRAY() ((void)0)
+#endif
 
 /* ============================================================================
  * Expression evaluation flags
@@ -168,7 +191,7 @@ extern "C"
 #define mytoupper(c) (charmap[(uint8_t)(c)])
 #else
 #define isnamestart(c) (isalpha((unsigned char)(c)) || (c) == '_')
-#define isnamechar(c) (isalnum((unsigned char)(c)) || (c) == '_' || (c) == '.')
+#define isnamechar(c) (isalnum((unsigned char)(c)) || (c) == '_' || (c) == '.' || (c) == 0x1e)
 #define isnameend(c) (isalnum((unsigned char)(c)) || (c) == '_' || (c) == '.' || (c) == '$' || (c) == '!' || (c) == '%')
 #define mytoupper(c) (toupper(c))
 #endif
@@ -253,6 +276,27 @@ extern "C"
         } val;
     } vartbl_val;
 
+#ifdef STRUCTENABLED
+    /* Structure member definition */
+    typedef struct s_structmember
+    {
+        unsigned char name[MAXVARLEN]; // Member name
+        unsigned char type;            // T_NBR, T_STR, T_INT, or T_STRUCT
+        unsigned char size;            // For strings: max length; for nested struct: struct index
+        int offset;                    // Byte offset within structure
+        short dims[MAXDIM];            // Array dimensions (0 = not an array)
+    } structmember_val;
+
+    /* Structure type definition */
+    typedef struct s_structdef
+    {
+        unsigned char name[MAXVARLEN];                     // Structure type name
+        int num_members;                                   // Number of members
+        struct s_structmember members[MAX_STRUCT_MEMBERS]; // Member definitions
+        int total_size;                                    // Total size in bytes
+    } structdef_val;
+#endif
+
     /* Hash table structure */
     typedef struct s_hash
     {
@@ -284,6 +328,16 @@ extern "C"
     extern struct s_funtbl funtbl[MAXSUBFUN];
     extern struct s_vartbl g_vartbl[];
 
+#ifdef STRUCTENABLED
+    extern struct s_structdef *g_structtbl[MAX_STRUCT_TYPES]; // Array of pointers, allocated per-type
+    extern int g_structcnt;
+    extern int g_StructArg;          // Struct index for pending DIM AS structtype
+    extern int g_StructMemberType;   // Type of struct member being accessed (0 if not a member access)
+    extern int g_StructMemberOffset; // Offset of member within struct (for EXTRACT/INSERT/SORT)
+    extern int g_StructMemberSize;   // Size of the member (for EXTRACT/INSERT/SORT)
+    extern int g_ExprStructType;     // Struct type index from expression evaluation
+#endif
+
     extern int g_varcnt;
     extern int g_Globalvarcnt;
     extern int g_Localvarcnt;
@@ -313,6 +367,9 @@ extern "C"
     extern unsigned short cmdSELECT_CASE, cmdFOR, cmdNEXT, cmdWHILE, cmdENDSUB, cmdENDFUNCTION;
     extern unsigned short cmdLOCAL, cmdSTATIC, cmdCASE, cmdDO, cmdLOOP, cmdCASE_ELSE, cmdEND_SELECT;
     extern unsigned short cmdSUB, cmdFUN, cmdCSUB, cmdIRET, cmdComment, cmdEndComment;
+#ifdef STRUCTENABLED
+    extern unsigned short cmdTYPE, cmdEND_TYPE;
+#endif
 
     /* ============================================================================
      * External variables - Error handling
@@ -452,7 +509,6 @@ extern "C"
     unsigned char *findlabel(unsigned char *labelptr);
     unsigned char *GetNextCommand(unsigned char *p, unsigned char **CLine, unsigned char *EOFMsg);
     int GetLineLength(unsigned char *p);
-    int IsValidLine(int line);
     int CountLines(unsigned char *target);
 
     /* ============================================================================
@@ -479,14 +535,31 @@ extern "C"
 #else
 int str_equal(const unsigned char *s1, const unsigned char *s2);
 #endif
-    int mem_equal(unsigned char *s1, unsigned char *s2, int i);
+
+    // Compare two areas of memory, ignoring case differences.
+    // Returns true if they are equal (ignoring case) otherwise returns false.
+    static inline int mem_equal(unsigned char *s1, unsigned char *s2, int i)
+    {
+        if (mytoupper(*(unsigned char *)s1) != mytoupper(*(unsigned char *)s2))
+            return 0;
+        while (--i)
+        {
+            if (mytoupper(*(unsigned char *)++s1) != mytoupper(*(unsigned char *)++s2))
+                return 0;
+        }
+        return 1;
+    }
 
     /* ============================================================================
      * Function declarations - Subroutines and functions
      * ============================================================================ */
     void DefinedSubFun(int iscmd, unsigned char *cmd, int index, MMFLOAT *fa, long long int *i64, unsigned char **sa, int *t);
     int FindSubFun(unsigned char *p, int type);
-    void PrepareProgram(int ErrAbort);
+    int PrepareProgram(int ErrAbort);        // Returns 0 on success, 1 on error (message in PreprogramErrMsg)
+    extern char PreprogramErrMsg[];          // Error message from PrepareProgram if it fails
+    extern unsigned char *PreprogramErrLine; // Line pointer where PrepareProgram error occurred
+    void PrintPreprogramError(void);         // Print PrepareProgram error with line info
+    extern int ProgramValid;                 // 0 = program has errors (cannot run), 1 = valid/runnable
 
     /* ============================================================================
      * Function declarations - I/O

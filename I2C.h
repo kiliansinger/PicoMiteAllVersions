@@ -84,20 +84,20 @@ POSSIBILITY OF SUCH DAMAGE.
 // OV7670 Camera Size Options
 typedef enum
 {
-  OV7670_SIZE_DIV1 = 0, // 640 x 480
-  OV7670_SIZE_DIV2,     // 320 x 240
-  OV7670_SIZE_DIV4,     // 160 x 120
-  OV7670_SIZE_DIV8,     // 80 x 60
-  OV7670_SIZE_DIV16,    // 40 x 30
+   OV7670_SIZE_DIV1 = 0, // 640 x 480
+   OV7670_SIZE_DIV2,     // 320 x 240
+   OV7670_SIZE_DIV4,     // 160 x 120
+   OV7670_SIZE_DIV8,     // 80 x 60
+   OV7670_SIZE_DIV16,    // 40 x 30
 } OV7670_size;
 
 // OV7670 Test Pattern Options
 typedef enum
 {
-  OV7670_TEST_PATTERN_NONE = 0,       // Disable test pattern
-  OV7670_TEST_PATTERN_SHIFTING_1,     // "Shifting 1" pattern
-  OV7670_TEST_PATTERN_COLOR_BAR,      // 8 color bars
-  OV7670_TEST_PATTERN_COLOR_BAR_FADE, // Color bars w/fade to white
+   OV7670_TEST_PATTERN_NONE = 0,       // Disable test pattern
+   OV7670_TEST_PATTERN_SHIFTING_1,     // "Shifting 1" pattern
+   OV7670_TEST_PATTERN_COLOR_BAR,      // 8 color bars
+   OV7670_TEST_PATTERN_COLOR_BAR_FADE, // Color bars w/fade to white
 } OV7670_pattern;
 
 /* ==============================================================================================================
@@ -107,33 +107,33 @@ typedef enum
 // OV7670 Command Structure
 typedef struct
 {
-  uint8_t reg;   // Register address
-  uint8_t value; // Value to store
+   uint8_t reg;   // Register address
+   uint8_t value; // Value to store
 } OV7670_command;
 
 // Nunchuk/Classic Controller Structure
 typedef struct s_nunstruct
 {
-  char x;
-  char y;
-  int ax;            // classic left x
-  int ay;            // classic left y
-  int az;            // classic centre
-  int Z;             // classic right x
-  int C;             // classic right y
-  int L;             // classic left analog
-  int R;             // classic right analog
-  unsigned short x0; // classic buttons
-  unsigned short y0;
-  unsigned short z0;
-  unsigned short x1;
-  unsigned short y1;
-  unsigned short z1;
-  uint64_t type;
-  uint8_t calib[16];
-  uint8_t classic[6];
-  int16_t gyro[3];
-  int16_t accs[3];
+   char x;
+   char y;
+   int ax;            // classic left x
+   int ay;            // classic left y
+   int az;            // classic centre
+   int Z;             // classic right x
+   int C;             // classic right y
+   int L;             // classic left analog
+   int R;             // classic right analog
+   unsigned short x0; // classic buttons
+   unsigned short y0;
+   unsigned short z0;
+   unsigned short x1;
+   unsigned short y1;
+   unsigned short z1;
+   uint64_t type;
+   uint8_t calib[16];
+   uint8_t classic[6];
+   int16_t gyro[3];
+   int16_t accs[3];
 } a_nunstruct;
 
 /* ==============================================================================================================
@@ -174,12 +174,14 @@ extern int mmI2Cvalue;
  * ============================================================================================================== */
 extern void i2c_disable(void);
 extern void i2c2_disable(void);
-extern void I2C_Send_Command(char command);
+extern int I2C_Send_Command(char command, int update_global);
+extern int I2C_Send_Data(unsigned char *data, int n, int update_global);
 extern uint8_t readRegister8(unsigned int addr, uint8_t reg);
 extern void WriteRegister8(unsigned int addr, uint8_t reg, uint8_t data);
 extern uint32_t readRegister32(unsigned int addr, uint8_t reg);
 extern void Write8Register16(unsigned int addr, uint16_t reg, uint8_t data);
 extern uint8_t read8Register16(unsigned int addr, uint16_t reg);
+extern int i2c_bus_recovery(int i2c_num, int baudrate);
 
 /* ==============================================================================================================
  * FUNCTION PROTOTYPES - Device Specific
@@ -197,8 +199,8 @@ extern void cameraclose(void);
  * ============================================================================================================== */
 extern void classicproc(void);
 extern void nunproc(void);
-extern void WiiReceive(int nbr, char *p);
-extern void WiiSend(int nbr, char *p);
+extern int WiiReceive(int nbr, char *p);
+extern int WiiSend(int nbr, char *p);
 
 /* ==============================================================================================================
  * OV7670 CAMERA REGISTER DEFINITIONS

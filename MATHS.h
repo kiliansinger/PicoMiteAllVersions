@@ -196,21 +196,21 @@ void MadgwickQuaternionUpdate(MMFLOAT ax, MMFLOAT ay, MMFLOAT az,
  */
 #ifdef rp2350
 int parsenumberarray(unsigned char *tp, MMFLOAT **a1float, int64_t **a1int,
-					 int argno, int dimensions, int *dims, bool ConstantNotAllowed);
+					 int argno, int dimensions, int *dims, bool ConstantNotAllowed, int *stride);
 int parsefloatarray(unsigned char *tp, MMFLOAT **a1float,
-					int argno, int dimensions, int *dims, bool ConstantNotAllowed);
+					int argno, int dimensions, int *dims, bool ConstantNotAllowed, int *stride);
 int parseintegerarray(unsigned char *tp, int64_t **a1int,
-					  int argno, int dimensions, int *dims, bool ConstantNotAllowed);
+					  int argno, int dimensions, int *dims, bool ConstantNotAllowed, int *stride);
 int parsestringarray(unsigned char *tp, unsigned char **a1str,
 					 int argno, int dimensions, int *dims, bool ConstantNotAllowed,
 					 unsigned char *length);
 #else
 int parsenumberarray(unsigned char *tp, MMFLOAT **a1float, int64_t **a1int,
-					 int argno, short dimensions, short *dims, bool ConstantNotAllowed);
+					 int argno, short dimensions, short *dims, bool ConstantNotAllowed, int *stride);
 int parsefloatarray(unsigned char *tp, MMFLOAT **a1float,
-					int argno, int dimensions, short *dims, bool ConstantNotAllowed);
+					int argno, int dimensions, short *dims, bool ConstantNotAllowed, int *stride);
 int parseintegerarray(unsigned char *tp, int64_t **a1int,
-					  int argno, int dimensions, short *dims, bool ConstantNotAllowed);
+					  int argno, int dimensions, short *dims, bool ConstantNotAllowed, int *stride);
 int parsestringarray(unsigned char *tp, unsigned char **a1str,
 					 int argno, int dimensions, short *dims, bool ConstantNotAllowed,
 					 unsigned char *length);

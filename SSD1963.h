@@ -350,6 +350,11 @@ extern void WriteComand(int cmd);
 extern void WriteData(int data);
 extern void WriteData16bit(int data);
 extern void Write16bitCommand(int cmd);
+#if PICOMITERP2350
+// Optional RAM-resident specs for flash-sensitive paths
+extern void __not_in_flash_func(WriteComand)(int cmd);
+extern void __not_in_flash_func(WriteData)(int data);
+#endif
 
 /* ==============================================================================================================
  * FUNCTION PROTOTYPES - Area Definition
@@ -357,6 +362,9 @@ extern void Write16bitCommand(int cmd);
 extern void SetAreaSSD1963(int x1, int y1, int x2, int y2);
 extern void SetAreaILI9341(int xstart, int ystart, int xend, int yend, int rw);
 extern void SetAreaIPS_4_16(int xstart, int ystart, int xend, int yend, int rw);
+#if PICOMITERP2350
+extern void __not_in_flash_func(SetAreaSSD1963)(int x1, int y1, int x2, int y2);
+#endif
 
 /* ==============================================================================================================
  * FUNCTION PROTOTYPES - Drawing Operations (SSD1963)

@@ -218,7 +218,7 @@ uint8_t PSRAMpin;
     volatile long long int mSecTimer = 0; // this is used to count mSec
     volatile unsigned int WDTimer = 0;
     volatile unsigned int diskchecktimer = DISKCHECKRATE;
-    volatile unsigned int clocktimer = 60 * 60 * 1000;
+    volatile unsigned int clocktimer = 60 * 1000;
     volatile unsigned int bufferupdatetimer = 0;
     volatile unsigned int PauseTimer = 0;
     volatile unsigned int ClassicTimer = 0;
@@ -494,6 +494,17 @@ uint8_t PSRAMpin;
 #define WITH_FRAMEBUFFER_LOCK(condition, code) code
 #endif
 
+    // Check if the system I2C bus is being held by user code
+    // Returns true if the bus is held and background tasks should be skipped
+    static inline int SystemI2CBusHeld(void)
+    {
+        if (I2C0locked && (I2C_Status & I2C_Status_BusHold))
+            return 1;
+        if (I2C1locked && (I2C2_Status & I2C_Status_BusHold))
+            return 1;
+        return 0;
+    }
+
     // Wii controller state machine processing
     typedef enum
     {
@@ -504,24 +515,25 @@ uint8_t PSRAMpin;
 
     static inline void process_wii_controller(volatile uint8_t *device_flag,
                                               volatile unsigned int *timer,
-                                              int *readstate,
+                                              unsigned char *readstate,
                                               void (*proc_func)(void),
                                               int threshold)
     {
         if (!(*device_flag) || *timer < threshold)
             return;
 
+        int status;
         switch (*readstate)
         {
         case WII_STATE_IDLE:
-            WiiSend(sizeof(readcontroller), (char *)readcontroller);
-            if (!mmI2Cvalue)
+            status = WiiSend(sizeof(readcontroller), (char *)readcontroller);
+            if (!status)
                 *readstate = WII_STATE_SEND;
             break;
 
         case WII_STATE_SEND:
-            WiiReceive(6, (char *)nunbuff);
-            *readstate = mmI2Cvalue ? WII_STATE_IDLE : WII_STATE_RECEIVE;
+            status = WiiReceive(6, (char *)nunbuff);
+            *readstate = status ? WII_STATE_IDLE : WII_STATE_RECEIVE;
             break;
 
         case WII_STATE_RECEIVE:
@@ -543,7 +555,7 @@ uint8_t PSRAMpin;
     void __not_in_flash_func(routinechecks)(void)
     {
         //        static int when = 0;
-        static int classicread = 0, nunchuckread = 0;
+        // Note: classicread and nunchuckread are global variables declared in I2C.c
         static uint64_t lastrun = 0;
         uint64_t timenow = time_us_64();
         if (timenow - lastrun < 1000)
@@ -683,14 +695,16 @@ uint8_t PSRAMpin;
 #endif
 
         // === RTC update ===
-        if (clocktimer == 0 && Option.RTC && !classicread && !nunchuckread)
+        // Skip if user code is holding the I2C bus
+        if (clocktimer == 0 && Option.RTC && !classicread && !nunchuckread && !SystemI2CBusHeld())
         {
             RtcGetTime(0);
         }
 
         // === I2C keyboard check ===
+        // Skip if user code is holding the I2C bus
 #ifndef USBKEYBOARD
-        if (Option.KeyboardConfig == CONFIG_I2C && KeyCheck == 0)
+        if (Option.KeyboardConfig == CONFIG_I2C && KeyCheck == 0 && !SystemI2CBusHeld())
         {
             CheckI2CKeyboard(0, keyread);
             keyread = !keyread;
@@ -699,12 +713,16 @@ uint8_t PSRAMpin;
 #endif
 
         // === Wii Classic Controller ===
-        process_wii_controller(&classic1, &ClassicTimer, &classicread,
-                               classicproc, 10);
+        // Skip if user code is holding the I2C bus
+        if (!SystemI2CBusHeld())
+            process_wii_controller(&classic1, &ClassicTimer, &classicread,
+                                   classicproc, 10);
 
         // === Wii Nunchuck ===
-        process_wii_controller(&nunchuck1, &NunchuckTimer, &nunchuckread,
-                               nunproc, 10);
+        // Skip if user code is holding the I2C bus
+        if (!SystemI2CBusHeld())
+            process_wii_controller(&nunchuck1, &NunchuckTimer, &nunchuckread,
+                                   nunproc, 10);
     }
     int __not_in_flash_func(getConsole)(void)
     {
@@ -5419,6 +5437,25 @@ uint32_t testPSRAM(void)
         FRAMEBUFFER = AllMemory + heap_memory_size + 256;
     }
 #endif
+
+#endif
+#ifdef PICOMITE
+        if (Option.DISPLAY_TYPE >= VIRTUAL && Option.DISPLAY_TYPE <= VIRTUAL_M)
+        {
+            int framebuffersize = 320 * 240 / 2;
+            heap_memory_size -= framebuffersize;
+            FRAMEBUFFER = (uint8_t *)(AllMemory + heap_memory_size + 256);
+        }
+#endif
+#ifdef GUICONTROLS
+        // Allocate GUI controls from top of heap if enabled
+        if (Option.MaxCtrls > 0)
+        {
+            int ctrlsSize = Option.MaxCtrls * sizeof(struct s_ctrl);
+            heap_memory_size -= ctrlsSize;
+            Ctrl = (struct s_ctrl *)(AllMemory + heap_memory_size + 256);
+            memset(Ctrl, 0, ctrlsSize);
+        }
 #endif
         uSec(100);
         hw_clear_bits(&watchdog_hw->ctrl, WATCHDOG_CTRL_ENABLE_BITS);
@@ -5758,8 +5795,12 @@ uint32_t testPSRAM(void)
             if (Option.Refresh)
                 Display_Refresh();
 #endif
-            PrepareProgram(true);
-            if (FindSubFun((unsigned char *)"MM.STARTUP", 0) >= 0)
+            if (PrepareProgram(true))
+            {
+                // Error in program - print message but continue to prompt
+                PrintPreprogramError();
+            }
+            if (ProgramValid && FindSubFun((unsigned char *)"MM.STARTUP", 0) >= 0)
             {
                 ExecuteProgram((unsigned char *)"MM.STARTUP\0");
                 memset(inpbuf, 0, STRINGSIZE);
@@ -5770,11 +5811,17 @@ uint32_t testPSRAM(void)
                             CallExecuteProgram((char *)kickvga);
                         }
             #endif*/
-            if (Option.Autorun)
+            if (Option.Autorun && ProgramValid)
             {
                 ClearRuntime(true);
-                PrepareProgram(true);
-                if (*ProgMemory == 0x01)
+                if (PrepareProgram(true))
+                {
+                    // Error in program - print message and disable autorun
+                    PrintPreprogramError();
+                    Option.Autorun = 0;
+                    SaveOptions();
+                }
+                else if (*ProgMemory == 0x01)
                 {
                     memset(tknbuf, 0, STRINGSIZE);
                     unsigned short tkn = GetCommandValue((unsigned char *)"RUN");
@@ -5831,8 +5878,8 @@ uint32_t testPSRAM(void)
             }
             if (_excep_code != POSSIBLE_WATCHDOG)
                 _excep_code = 0;
-            PrepareProgram(false);
-            if (!ErrorInPrompt && FindSubFun((unsigned char *)"MM.PROMPT", 0) >= 0)
+            PrepareProgram(false); // Don't abort on error - just silently skip bad definitions
+            if (ProgramValid && !ErrorInPrompt && FindSubFun((unsigned char *)"MM.PROMPT", 0) >= 0)
             {
                 ErrorInPrompt = true;
                 ExecuteProgram((unsigned char *)"MM.PROMPT\0");
@@ -5873,7 +5920,7 @@ uint32_t testPSRAM(void)
                 i = 1;
             if (setjmp(jmprun) != 0)
             {
-                PrepareProgram(false);
+                PrepareProgram(false); // Don't abort on error
                 CurrentLinePtr = 0;
             }
             ExecuteProgram(tknbuf); // execute the line straight away

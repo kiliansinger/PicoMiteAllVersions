@@ -2767,8 +2767,8 @@ void cmd_mouse(void)
 		n = getint(argv[0], 2, 2);
 		nunstruct[n].ax = getint(argv[2], 0, HRes - 1);
 		nunstruct[n].ay = getint(argv[4], 0, VRes - 1);
-		if (argc == 5)
-			nunstruct[n].az = getint(argv[6], -128, 127);
+		if (argc == 7)
+			nunstruct[n].az = getint(argv[6], -1000000, 1000000);
 	}
 	else if ((tp = checkstring(cmdline, (unsigned char *)"INTERRUPT DISABLE")))
 	{

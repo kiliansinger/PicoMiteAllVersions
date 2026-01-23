@@ -461,7 +461,7 @@ void edit(unsigned char *cmdline, bool cmdfile)
     editactive = 1;
     oldmode = DISPLAY_TYPE;
     oldfont = PromptFont;
-    if (HRes < 512)
+    if (HRes < 512 || Option.DISPLAY_TYPE != SCREENMODE1)
     {
         DISPLAY_TYPE = SCREENMODE1;
         modmode = true;
@@ -494,13 +494,6 @@ void edit(unsigned char *cmdline, bool cmdfile)
     }
     if (Option.DISPLAY_CONSOLE == true && HRes / gui_font_width < 32)
         error("Font is too large");
-#if PICOMITERP2350
-    if (Option.DISPLAY_TYPE >= VIRTUAL && Option.DISPLAY_TYPE < VGA222 && WriteBuf)
-        FreeMemorySafe((void **)&WriteBuf);
-#else
-    if (Option.DISPLAY_TYPE >= VIRTUAL && WriteBuf)
-        FreeMemorySafe((void **)&WriteBuf);
-#endif
     if (cmdfile)
     {
         ClearVars(0, true);
@@ -531,6 +524,7 @@ void edit(unsigned char *cmdline, bool cmdfile)
             SetFont(Option.DefaultFont);
             PromptFont = Option.DefaultFont;
         }
+        ytileheight = gui_font_height;
 #endif
     }
 
@@ -1497,7 +1491,11 @@ void FullScreenEditor(int xx, int yy, char *fname, int edit_buff_size, bool cmdf
                 // this must be save, exit and run.  We have done the first two, now do the run part.
                 ClearRuntime(true);
                 //                            WatchdogSet = false;
-                PrepareProgram(true);
+                if (PrepareProgram(true))
+                {
+                    PrintPreprogramError();
+                    return;
+                }
                 // Create a global constant MM.CMDLINE$ containing the empty string.
                 //                            (void) findvar((unsigned char *)"MM.CMDLINE$", V_FIND | V_DIM_VAR | T_CONST);
                 if (Option.LIBRARY_FLASH_SIZE == MAX_PROG_SIZE)

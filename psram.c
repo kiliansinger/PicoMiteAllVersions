@@ -29,6 +29,9 @@
 #include "hardware/gpio.h"
 #include "hardware/clocks.h"
 #include "hardware/sync.h"
+#include "configuration.h"
+#include "Hardware_Includes.h"
+#include "MMBasic.h"
 
 #include "psram.h"
 
@@ -354,7 +357,12 @@ static int psram_init(int pin, bool clear_memory)
 
 	/* Clear PSRAM */
 	if (clear_memory)
-		memset((void *)PSRAM_NOCACHE_BASE, 0, psram_sz);
+		memset((void *)PSRAM_NOCACHE_BASE, 0, psram_sz-2*1024*1024);
+        for(int i=1; i<=MAXRAMSLOTS;i++){	
+			uint8_t *j=(uint8_t *)(PSRAM_NOCACHE_BASE+psram_sz-2*1024*1024+0x60000+ ((i - 1) * MAX_PROG_SIZE));
+//        	uint8_t *j = (uint8_t *)PSRAMblock + ((i - 1) * MAX_PROG_SIZE);
+        	if(*j!=T_NEWLINE)memset(j, 0, MAX_PROG_SIZE);
+		}
 
 	return ret;
 }
@@ -366,11 +374,11 @@ void psram_setup()
 	int res = psram_init(PSRAMCSPIN, true);
 	if (res == -3)
 	{
-		printf("PSRAM: Cannot write to PSRAM!\n");
+		MMPrintString("PSRAM: Cannot write to PSRAM!\r\n");
 	}
 	else if (res == -4)
 	{
-		printf("PSRAM: Memory size mismatch!\n");
+		MMPrintString("PSRAM: Memory size mismatch!\r\n");
 	}
 #endif
 }

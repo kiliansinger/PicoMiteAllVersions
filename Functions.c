@@ -1050,10 +1050,15 @@ void fun_instr(void)
 		OptionEscape = tmp;
 		if (argc == 5 + n)
 		{ // This is the passed variable to return the match length
+			int regex_vtype;
 			temp = findvar(argv[4 + n], V_FIND);
-			if (!(g_vartbl[g_VarIndex].type & (T_NBR | T_INT)))
+			regex_vtype = g_vartbl[g_VarIndex].type;
+#ifdef STRUCTENABLED
+			if (g_StructMemberType != 0) regex_vtype = g_StructMemberType;
+#endif
+			if (!(regex_vtype & (T_NBR | T_INT)))
 				error("Invalid variable");
-			if (g_vartbl[g_VarIndex].type & T_INT)
+			if (regex_vtype & T_INT)
 				tempi = temp;
 			else
 				tempf = temp;

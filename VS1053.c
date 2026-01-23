@@ -158,32 +158,17 @@ void writeRegister(uint8_t _reg, uint16_t _value)
 
 void __not_in_flash_func(sdi_send_buffer)(uint8_t *data, size_t len)
 {
-    size_t chunk_length; // Length of chunk 32 byte or shorter
+    // Simplified: send only one chunk (up to 32 bytes) per call
+    // Flow control is handled by caller checking DREQ before calling
+    spi_inst_t *spi = (PinDef[Option.AUDIO_CLK_PIN].mode & SPI0SCK) ? spi0 : spi1;
+
+    if (len > vs1053_chunk_size)
+        len = vs1053_chunk_size;
 
     gpio_put(cs_pin, GPIO_PIN_SET);
     gpio_put(dcs_pin, GPIO_PIN_RESET);
-    while (len) // More to do?
-    {
-        while (!(gpio_get(dreq_pin)))
-        {
-        }
-        chunk_length = len;
-        if (len > vs1053_chunk_size)
-        {
-            chunk_length = vs1053_chunk_size;
-        }
-        len -= chunk_length;
-        if (PinDef[Option.AUDIO_CLK_PIN].mode & SPI0SCK)
-            spi_write_fast(spi0, data, chunk_length);
-        else
-            spi_write_fast(spi1, data, chunk_length);
-        //        xmit_multi(data, chunk_length);
-        data += chunk_length;
-    }
-    if (PinDef[Option.AUDIO_CLK_PIN].mode & SPI0SCK)
-        spi_finish(spi0);
-    else
-        spi_finish(spi1);
+    spi_write_fast(spi, data, len);
+    spi_finish(spi);
     gpio_put(dcs_pin, GPIO_PIN_SET);
 }
 
