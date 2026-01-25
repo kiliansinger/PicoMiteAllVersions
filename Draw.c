@@ -5187,7 +5187,7 @@ void getspritebounds(int bnbr)
     spritebuff[bnbr]->boundsbottom = bounds_block + h + h + w;
     for (int x = 0; x < w; ++x)
     {
-        spritebuff[bnbr]->boundstop[x] = SHRT_MAX;
+        spritebuff[bnbr]->boundstop[x] = h;
         spritebuff[bnbr]->boundsbottom[x] = -1;
     }
     int nib = 1;
