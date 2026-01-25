@@ -1609,9 +1609,155 @@ void FullScreenEditor(int xx, int yy, char *fname, int edit_buff_size, bool cmdf
                 buf[i + 1] = 0;
                 break;
 
-            // F9 to F12 - Normal function keys
+            // F9 - Import file at current position
             case F9:
+            {
+                // Get filename from user
+                GetInputString((unsigned char *)"Import file: ");
+                if (*inpbuf == 0 || *inpbuf == ESC)
+                    break;
+
+                // Copy filename to local buffer
+                static char importfile[FF_MAX_LFN];
+                strcpy(importfile, (char *)inpbuf);
+
+                // Add .bas extension if no extension and file not found
+                if (!ExistsFile(importfile))
+                {
+                    if (strchr(importfile, '.') == NULL)
+                        strcat(importfile, ".bas");
+                }
+
+                // Check file exists and get size
+                if (!ExistsFile(importfile))
+                {
+                    editDisplayMsg((unsigned char *)" FILE NOT FOUND ");
+                    break;
+                }
+
+                int fsize = FileSize(importfile);
+                unsigned char *endp;
+                for (endp = EdBuff; *endp; endp++)
+                    ; // find end of current text
+                int current_size = endp - EdBuff;
+
+                if (current_size + fsize >= edit_buff_size - 10)
+                {
+                    editDisplayMsg((unsigned char *)" FILE TOO LARGE ");
+                    break;
+                }
+
+                // Save current cursor position
+                unsigned char *saved_txtp = txtp;
+
+                // Pre-process filename same way ExistsFile does
+                // Must set FatFSFileSystem correctly before BasicFileOpen
+                int waste = 0;
+                char *openname = importfile;
+                int t = drivecheck(importfile, &waste);
+                openname += waste;
+                FatFSFileSystem = t - 1;
+
+                // Open the file
+                int fnbr = FindFreeFileNbr();
+                if (!BasicFileOpen(openname, fnbr, FA_READ))
+                {
+                    editDisplayMsg((unsigned char *)" CANNOT OPEN FILE ");
+                    break;
+                }
+
+                // Read file and insert each character
+                char ch;
+                int insert_count = 0;
+                while (!FileEOF(fnbr))
+                {
+                    ch = FileGetChar(fnbr);
+                    if (ch == '\r')
+                        continue; // skip carriage returns
+                    if (ch == '\n')
+                        nbrlines++;
+                    if (!editInsertChar((unsigned char)ch, &multi, edit_buff_size))
+                    {
+                        FileClose(fnbr);
+                        editDisplayMsg((unsigned char *)" OUT OF MEMORY ");
+                        break;
+                    }
+                    insert_count++;
+                }
+                FileClose(fnbr);
+
+                // Restore cursor to original position (before inserted text)
+                txtp = saved_txtp;
+
+                TextChanged = true;
+                printScreen();
+                PositionCursor(txtp);
+
+                // Display success message
+                char msg[40];
+                sprintf(msg, " IMPORTED %d CHARS ", insert_count);
+                editDisplayMsg((unsigned char *)msg);
+            }
+            break;
+
+            // F10 - Export clipboard to file
             case F10:
+            {
+                // Check if clipboard has content
+                if (clipboard[0] == 0)
+                {
+                    editDisplayMsg((unsigned char *)" CLIPBOARD IS EMPTY ");
+                    break;
+                }
+
+                // Get filename from user
+                GetInputString((unsigned char *)"Export to file: ");
+                if (*inpbuf == 0 || *inpbuf == ESC)
+                    break;
+
+                // Copy filename to local buffer
+                static char exportfile[FF_MAX_LFN];
+                strcpy(exportfile, (char *)inpbuf);
+
+                // Add .bas extension if no extension specified
+                if (strchr(exportfile, '.') == NULL)
+                    strcat(exportfile, ".bas");
+
+                // Pre-process filename same way as F9 - set FatFSFileSystem correctly
+                int waste = 0;
+                char *openname = exportfile;
+                int t = drivecheck(exportfile, &waste);
+                openname += waste;
+                FatFSFileSystem = t - 1;
+
+                // Open file for writing
+                int fnbr = FindFreeFileNbr();
+                if (!BasicFileOpen(openname, fnbr, FA_WRITE | FA_CREATE_ALWAYS))
+                {
+                    editDisplayMsg((unsigned char *)" CANNOT CREATE FILE ");
+                    break;
+                }
+
+                // Write clipboard contents to file
+                int export_count = 0;
+                unsigned char *cp = clipboard;
+                while (*cp)
+                {
+                    if (*cp == '\n')
+                        FilePutChar('\r', fnbr); // Add CR before LF for proper line endings
+                    FilePutChar(*cp++, fnbr);
+                    export_count++;
+                }
+                FileClose(fnbr);
+
+                // Display success message
+                char msg[40];
+                sprintf(msg, " EXPORTED %d CHARS ", export_count);
+                editDisplayMsg((unsigned char *)msg);
+            }
+            break;
+
+            // F11 to F12 - Normal function keys
             case F11:
             case F12:
                 break;
@@ -1837,8 +1983,8 @@ void MarkMode(unsigned char *cb, unsigned char *buf)
 
         case CTRLKEY('E'):
         case UP:
-            if (cury <= 0)
-                continue;
+            if (cury <= 0 && edy == 0)
+                continue; // at very top of file
             p = mark;
             if (*p == '\n')
                 p--; // step back over the terminator if we are right at the end of the line
@@ -1851,7 +1997,6 @@ void MarkMode(unsigned char *cb, unsigned char *buf)
                     ; // move to the beginning of that line
                 if (*p == '\n')
                     p++; // and position at the start
-                // if(i >= VWidth) {
                 if (i > VWidth)
                 {
                     editDisplayMsg((unsigned char *)" LINE IS TOO LONG ");
@@ -1863,18 +2008,22 @@ void MarkMode(unsigned char *cb, unsigned char *buf)
             for (i = 0; i < edx + curx && *mark != 0 && *mark != '\n'; i++, mark++)
                 ; // move the cursor to the column
             curx = i;
-            cury--;
+            if (cury > 0)
+                cury--;
+            else if (edy > 0)
+            {
+                edy--;
+                printScreen();
+                PrintFunctKeys(MARK);
+            }
             break;
 
         case CTRLKEY('X'):
         case DOWN:
-            if (cury == VHeight - 1)
-                continue;
             for (p = mark, i = curx; *p != 0 && *p != '\n'; p++, i++)
                 ; // move to the end of this line
             if (*p == 0)
                 continue; // skip if it is at the end of the file
-                          // if(i >= VWidth) {
             if (i > VWidth)
             {
                 editDisplayMsg((unsigned char *)" LINE IS TOO LONG ");
@@ -1885,7 +2034,14 @@ void MarkMode(unsigned char *cb, unsigned char *buf)
             for (i = 0; i < edx + curx && *mark != 0 && *mark != '\n'; i++, mark++)
                 ; // move the cursor to the column
             curx = i;
-            cury++;
+            if (cury < VHeight - 1)
+                cury++;
+            else if (edy + VHeight < nbrlines)
+            {
+                edy++;
+                printScreen();
+                PrintFunctKeys(MARK);
+            }
             break;
 
         case CTRLKEY('S'):
@@ -1922,7 +2078,6 @@ void MarkMode(unsigned char *cb, unsigned char *buf)
                 break;
             for (p = mark, i = curx; *p != 0 && *p != '\n'; p++, i++)
                 ; // move to the end of this line
-            // if(i >= VWidth) {
             if (i > VWidth)
             {
                 editDisplayMsg((unsigned char *)" LINE IS TOO LONG ");
@@ -1931,10 +2086,84 @@ void MarkMode(unsigned char *cb, unsigned char *buf)
             }
             mark = p;
             break;
+
+        case CTRLKEY('P'):
+        case PUP:
+            if (edy == 0)
+            {
+                // Already at top, move mark to beginning of file
+                mark = EdBuff;
+                cury = 0;
+                curx = 0;
+            }
+            else
+            {
+                // Scroll up by VHeight lines
+                int scrollamt = (edy >= VHeight) ? VHeight : edy;
+                edy -= scrollamt;
+                // Move mark up by scrollamt lines
+                for (i = 0; i < scrollamt && mark != EdBuff; i++)
+                {
+                    if (*mark == '\n')
+                        mark--;
+                    while (mark != EdBuff && *mark != '\n')
+                        mark--;
+                    if (*mark == '\n' && mark != EdBuff)
+                        mark--;
+                    while (mark != EdBuff && *mark != '\n')
+                        mark--;
+                    if (*mark == '\n')
+                        mark++;
+                }
+                // Position at start of line
+                while (mark != EdBuff && *(mark - 1) != '\n')
+                    mark--;
+                for (i = 0; i < edx + curx && *mark != 0 && *mark != '\n'; i++, mark++)
+                    ;
+                curx = i;
+                printScreen();
+                PrintFunctKeys(MARK);
+            }
+            break;
+
+        case CTRLKEY('L'):
+        case PDOWN:
+            if (edy + VHeight >= nbrlines)
+            {
+                // Already showing end, move mark to end of file
+                while (*mark)
+                    mark++;
+                cury = VHeight - 1;
+            }
+            else
+            {
+                // Scroll down by VHeight lines
+                int scrollamt = VHeight;
+                if (edy + VHeight + scrollamt > nbrlines)
+                    scrollamt = nbrlines - edy - VHeight;
+                edy += scrollamt;
+                // Move mark down by scrollamt lines
+                for (i = 0; i < scrollamt && *mark; i++)
+                {
+                    while (*mark && *mark != '\n')
+                        mark++;
+                    if (*mark == '\n')
+                        mark++;
+                }
+                // Position at column
+                for (i = 0; i < edx + curx && *mark != 0 && *mark != '\n'; i++, mark++)
+                    ;
+                curx = i;
+                printScreen();
+                PrintFunctKeys(MARK);
+            }
+            break;
+
         case CTRLKEY('Y'):
         case CTRLKEY('T'):
         case F5:
         case F4:
+        case F10:
             if (txtp - mark > MAXCLIP || mark - txtp > MAXCLIP)
             {
                 editDisplayMsg((unsigned char *)" MARKED TEXT EXCEEDS CLIPBOARD BUFFER SIZE");
@@ -1954,8 +2183,76 @@ void MarkMode(unsigned char *cb, unsigned char *buf)
                     *cb++ = *p++;
             }
             *cb = 0;
-            if (c == F5 || c == CTRLKEY('Y'))
+            if (c == F5 || c == CTRLKEY('Y') || c == F10)
             {
+                // For F10, also export to file before returning
+                if (c == F10)
+                {
+                    // Get filename from user
+                    GetInputString((unsigned char *)"Export to file: ");
+                    if (*inpbuf != 0 && *inpbuf != ESC)
+                    {
+                        // Copy filename to local buffer
+                        static char exportfile[FF_MAX_LFN];
+                        strcpy(exportfile, (char *)inpbuf);
+
+                        // Add .bas extension if no extension specified
+                        if (strchr(exportfile, '.') == NULL)
+                            strcat(exportfile, ".bas");
+
+                        // Pre-process filename - set FatFSFileSystem correctly
+                        int waste = 0;
+                        char *openname = exportfile;
+                        int t = drivecheck(exportfile, &waste);
+                        openname += waste;
+                        FatFSFileSystem = t - 1;
+
+                        // Open file for writing
+                        int fnbr = FindFreeFileNbr();
+                        if (BasicFileOpen(openname, fnbr, FA_WRITE | FA_CREATE_ALWAYS))
+                        {
+                            // Write clipboard contents to file
+                            // Note: cb has been incremented, so use buf parameter which points to original clipboard
+                            int export_count = 0;
+                            unsigned char *cp = buf; // buf points to start of clipboard passed to MarkMode
+                            // Actually we need the original clipboard start - recalculate
+                            cp = (mark <= txtp) ? mark : txtp;
+                            unsigned char *cpend = (mark <= txtp) ? txtp : mark;
+                            while (cp < cpend)
+                            {
+                                if (*cp == '\n')
+                                    FilePutChar('\r', fnbr);
+                                FilePutChar(*cp++, fnbr);
+                                export_count++;
+                            }
+                            FileClose(fnbr);
+
+                            char msg[40];
+                            sprintf(msg, " EXPORTED %d CHARS ", export_count);
+                            editDisplayMsg((unsigned char *)msg);
+                        }
+                        else
+                        {
+                            editDisplayMsg((unsigned char *)" CANNOT CREATE FILE ");
+                        }
+                    }
+                }
+                // Calculate line number of txtp and adjust edy if needed
+                int ln;
+                unsigned char *pp;
+                for (pp = EdBuff, ln = 0; pp < txtp; pp++)
+                    if (*pp == '\n')
+                        ln++;
+                // If txtp is off-screen, adjust edy to center it
+                if (ln < edy || ln >= edy + VHeight)
+                {
+                    edy = ln - VHeight / 2;
+                    if (edy < 0)
+                        edy = 0;
+                    if (edy + VHeight > nbrlines)
+                        edy = (nbrlines > VHeight) ? nbrlines - VHeight : 0;
+                }
+                cury = ln - edy;
                 PositionCursor(txtp);
 #ifndef PICOMITE
 #ifndef PICOMITEWEB
@@ -1993,6 +2290,24 @@ void MarkMode(unsigned char *cb, unsigned char *buf)
             *p++ = 0;
             *p++ = 0;
             TextChanged = true;
+            // Calculate line number of txtp and adjust edy if needed
+            {
+                int ln;
+                unsigned char *pp;
+                for (pp = EdBuff, ln = 0; pp < txtp; pp++)
+                    if (*pp == '\n')
+                        ln++;
+                // If txtp is off-screen, adjust edy to center it
+                if (ln < edy || ln >= edy + VHeight)
+                {
+                    edy = ln - VHeight / 2;
+                    if (edy < 0)
+                        edy = 0;
+                    if (edy + VHeight > nbrlines)
+                        edy = (nbrlines > VHeight) ? nbrlines - VHeight : 0;
+                }
+                cury = ln - edy;
+            }
             PositionCursor(txtp);
 #ifndef PICOMITE
 #ifndef PICOMITEWEB
@@ -2020,81 +2335,94 @@ void MarkMode(unsigned char *cb, unsigned char *buf)
         x = curx;
         y = cury;
         markmode = true;
-        // first unmark the area not marked as a result of the keystroke
+
+        // Calculate visible line range
+        unsigned char *visStart, *visEnd;
+        int ln;
+        for (visStart = EdBuff, ln = 0; ln < edy && *visStart; visStart++)
+            if (*visStart == '\n')
+                ln++;
+        for (visEnd = visStart, ln = 0; ln < VHeight && *visEnd; visEnd++)
+            if (*visEnd == '\n')
+                ln++;
+
+        // Determine the marked range (low to high)
+        unsigned char *markLow = (mark < txtp) ? mark : txtp;
+        unsigned char *markHigh = (mark < txtp) ? txtp : mark;
+
+        // first unmark the area not marked as a result of the keystroke (only visible portion)
         if (oldmark < mark)
         {
-            PositionCursor(oldmark);
             p = oldmark;
+            if (p >= visStart && p < visEnd)
+                PositionCursor(p);
             while (p < mark)
             {
-                if (*p == '\n')
+                if (p >= visStart && p < visEnd)
                 {
-                    SSputchar('\r', 0);
-                    MX470PutC('\r');
-                } // also print on the MX470 display
-                MX470PutC(*p); // print on the MX470 display
-                SSputchar(*p++, 0);
+                    if (*p == '\n')
+                    {
+                        SSputchar('\r', 0);
+                        MX470PutC('\r');
+                    }
+                    MX470PutC(*p);
+                    SSputchar(*p, 0);
+                }
+                p++;
             }
         }
         else if (oldmark > mark)
         {
-            PositionCursor(mark);
             p = mark;
+            if (p >= visStart && p < visEnd)
+                PositionCursor(p);
             while (oldmark > p)
             {
-                if (*p == '\n')
+                if (p >= visStart && p < visEnd)
                 {
-                    SSputchar('\r', 0);
-                    MX470PutC('\r');
-                } // also print on the MX470 display
-                MX470PutC(*p); // print on the MX470 display
-                SSputchar(*p++, 0);
+                    if (*p == '\n')
+                    {
+                        SSputchar('\r', 0);
+                        MX470PutC('\r');
+                    }
+                    MX470PutC(*p);
+                    SSputchar(*p, 0);
+                }
+                p++;
             }
         }
 #ifndef USBKEYBOARD
-        // fflush(stdout);
         tud_cdc_write_flush();
 #endif
         oldmark = mark;
         oldx = x;
         oldy = y;
 
-        // now draw the marked area
-        if (mark < txtp)
+        // now draw the marked area (only visible portion)
+        if (markLow < markHigh)
         {
-            PositionCursor(mark);
-            PrintString("\033[7m");
-            MX470Display(REVERSE_VIDEO); // reverse video on the MX470 display only
-            p = mark;
-            while (p < txtp)
+            // Find where to start drawing (intersection of marked range and visible range)
+            unsigned char *drawStart = (markLow > visStart) ? markLow : visStart;
+            unsigned char *drawEnd = (markHigh < visEnd) ? markHigh : visEnd;
+
+            if (drawStart < drawEnd)
             {
-                if (*p == '\n')
+                PositionCursor(drawStart);
+                PrintString("\033[7m");
+                MX470Display(REVERSE_VIDEO);
+                p = drawStart;
+                while (p < drawEnd)
                 {
-                    SSputchar('\r', 0);
-                    MX470PutC('\r'); // also print on the MX470 display
+                    if (*p == '\n')
+                    {
+                        SSputchar('\r', 0);
+                        MX470PutC('\r');
+                    }
+                    MX470PutC(*p);
+                    SSputchar(*p++, 0);
                 }
-                MX470PutC(*p); // print on the MX470 display
-                SSputchar(*p++, 0);
+                MX470Display(REVERSE_VIDEO);
             }
-            MX470Display(REVERSE_VIDEO); // reverse video back to normal on the MX470 display only
-        }
-        else if (mark > txtp)
-        {
-            PositionCursor(txtp);
-            PrintString("\033[7m");
-            MX470Display(REVERSE_VIDEO); // reverse video on the MX470 display only
-            p = txtp;
-            while (p < mark)
-            {
-                if (*p == '\n')
-                {
-                    SSputchar('\r', 0);
-                    MX470PutC('\r'); // also print on the MX470 display
-                }
-                MX470PutC(*p); // print on the MX470 display
-                SSputchar(*p++, 0);
-            }
-            MX470Display(REVERSE_VIDEO); // reverse video back to normal on the MX470 display only
         }
         markmode = false;
         PrintString("\033[0m"); // normal video
@@ -2550,17 +2878,21 @@ void PrintFunctKeys(int typ)
 
     if (typ == EDIT)
     {
-        if (VWidth >= 78)
-            p = "ESC:Exit F1:Save F2:Run F3/6:Find/r F4:Mrk F5:Paste F7/8:Repl/r          ";
-        else if (VWidth >= 62)
-            p = "F1:Save F2:Run F3:Find F4:Mark F5:Paste";
+        if (VWidth > 80)
+            p = "ESC:Exit F1:Save F2:Run F3/6:Find/r F4:Mrk F5:Paste F7/8:Rpl/r F9:In F10:Out";
+        else if (VWidth >= 70)
+            p = "F1:Save F2:Run F3:Find F4:Mark F5:Paste F7:Repl F7/8:Rpl/r";
+        else if (VWidth >= 55)
+            p = "F1:Save F2:Run F3:Find F4:Mrk F5:Paste F9:In F10:Out";
         else
             p = "EDIT MODE";
     }
     else
     {
-        if (VWidth >= 49)
-            p = "MARK MODE   ESC=Exit  DEL:Delete  F4:Cut  F5:Copy";
+        if (VWidth >= 70)
+            p = "MARK MODE  ESC=Exit DEL:Delete F4:Cut F5:Copy F10:Export";
+        else if (VWidth >= 49)
+            p = "MARK MODE  ESC:Exit DEL:Del F4:Cut F5:Cpy F10:Out";
         else
             p = "MARK MODE";
     }

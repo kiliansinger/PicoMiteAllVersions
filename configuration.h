@@ -229,7 +229,7 @@ extern "C"
 #define MAXSUBFUN 512
 
 #ifdef USBKEYBOARD
-#define MagicKey 0x5C7653A65
+#define MagicKey 0x5C765A65
 #else
 #define MagicKey 0x1A456EB4
 #endif
