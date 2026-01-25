@@ -5213,7 +5213,7 @@ void getspritebounds(int bnbr)
                 spritebuff[bnbr]->boundsleft[y] = x;
             spritebuff[bnbr]->boundsright[y] = x;
             spritebuff[bnbr]->boundsbottom[x] = y;
-            if (spritebuff[bnbr]->boundstop[x] == SHRT_MAX)
+            if (spritebuff[bnbr]->boundstop[x] == h)
                 spritebuff[bnbr]->boundstop[x] = y;
         }
     }
