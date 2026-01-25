@@ -123,7 +123,8 @@ enum CelestialBody
   BODY_JUPITER = 4,
   BODY_SATURN = 5,
   BODY_URANUS = 6,
-  BODY_NEPTUNE = 7
+  BODY_NEPTUNE = 7,
+  BODY_SUN = 8
 };
 
 typedef struct
@@ -157,18 +158,18 @@ const Star starCatalog[] = {
     {"Alshain", 296.565000, +6.425000, 0.53600, 0.38500},          // HIP 94779"
     {"Altair", 297.695827, +8.868322, 0.53682, 0.38554},           // HIP 97649"
     {"Aludra", 97.962083, -29.247500, -0.00400, -0.00200},         // HIP 30324"
-    {"Andromeda Galaxy", 10.684708, 41.269167, 0.0, 0.0},    //"
+    {"Andromeda Galaxy", 10.684708, 41.269167, 0.0, 0.0},          //"
     {"Antares", 247.351915, -26.432002, -0.01016, -0.02321},       // HIP 80763"
     {"Arcturus", 213.915300, +19.182410, -1.09345, -2.00094},      // HIP 69673"
     {"Aspidiske", 122.383333, -47.336667, -0.01200, -0.00600},     // HIP 39953"
     {"Bellatrix", 81.282000, +6.350000, -0.00800, -0.01300},       // HIP 25336"
     {"Betelgeuse", 88.792939, +7.407064, 0.02495, 0.00956},        // HIP 27989"
-    {"Bodes Galaxy", 148.888750, 69.064444, 0.0, 0.0},      //"
+    {"Bodes Galaxy", 148.888750, 69.064444, 0.0, 0.0},             //"
     {"Canopus", 95.987875, -52.695718, 0.01993, 0.02324},          // HIP 30438"
     {"Capella", 79.172327, +45.997991, 0.07552, -0.42713},         // HIP 24608"
     {"Caph", 2.294167, +59.149444, 0.00300, -0.00200},             // HIP 746"
     {"Castor", 113.650000, +31.888333, -0.19100, -0.04500},        // HIP 36850"
-    {"Cigar Galaxy", 149.062500, 69.679722, 0.0, 0.0},       //"
+    {"Cigar Galaxy", 149.062500, 69.679722, 0.0, 0.0},             //"
     {"Deneb", 310.357979, +45.280338, 0.00146, 0.00129},           // HIP 102098"
     {"Denebola", 177.264167, +14.572056, -0.49700, -0.11400},      // HIP 57632"
     {"Dubhe", 165.460000, +61.751000, -0.13500, -0.03500},         // HIP 54061"
@@ -210,13 +211,13 @@ const Star starCatalog[] = {
     {"Shedir", 10.127500, +56.537222, 0.00200, -0.00300},          // HIP 3179"
     {"Sirius", 101.287155, -16.716116, -0.54601, -1.22307},        // HIP 32349"
     {"Small Magellanic Cloud", 13.158333, -72.800278, 0.0, 0.0},   //"
-    {"Sombrero Galaxy", 189.997917, -11.622778, 0.0, 0.0},  //"
+    {"Sombrero Galaxy", 189.997917, -11.622778, 0.0, 0.0},         //"
     {"Spica", 201.298247, -11.161322, -0.04235, -0.03173},         // HIP 65474"
     {"Suhail", 131.175000, -42.654167, -0.01000, -0.00500},        // HIP 42312"
     {"Tarazed", 297.042000, +10.613000, 0.53600, 0.38500},         // HIP 94779"
-    {"Triangulum Galaxy", 23.462083, 30.659722, 0.0, 0.0},   //"
+    {"Triangulum Galaxy", 23.462083, 30.659722, 0.0, 0.0},         //"
     {"Vega", 279.234734, +38.783688, 0.20094, 0.28623},            // HIP 91262"
-    {"Whirlpool Galaxy", 202.479167, 47.195278, 0.0, 0.0},   //"
+    {"Whirlpool Galaxy", 202.479167, 47.195278, 0.0, 0.0},         //"
     {"Zubenelgenubi", 229.251667, -16.202500, -0.01000, -0.00500}, // HIP 72622"
     {"Zubeneschamali", 233.671667, -9.382500, -0.01200, -0.00600}, // HIP 73473"
 };
@@ -595,6 +596,11 @@ void GPS_parse(char *nmea)
       // bad checksum :(
       return;
     }
+  }
+  else
+  {
+     //Missing Checksum, Abort!
+     return;
   }
   char degreebuff[10];
   // look for a few common sentences
@@ -1016,6 +1022,47 @@ struct s_RADec getCelestialPosition(enum CelestialBody body, MMFLOAT T, MMFLOAT 
       Omega = 131.72169 - 0.00606 * T;
       w = 44.97135 - 0.00711 * T;
       break;
+    case BODY_SUN:
+    {
+      // Sun's geocentric position is computed from Earth's heliocentric position
+      // Using simplified solar coordinates from Meeus Chapter 25
+      MMFLOAT L0_sun = 280.46646 + 36000.76983 * T + 0.0003032 * T * T;
+      MMFLOAT M_sun = 357.52911 + 35999.05029 * T - 0.0001537 * T * T;
+      L0_sun = fmod(L0_sun, 360.0);
+      if (L0_sun < 0.0)
+        L0_sun += 360.0;
+      M_sun = fmod(M_sun, 360.0);
+      if (M_sun < 0.0)
+        M_sun += 360.0;
+
+      MMFLOAT M_sun_rad = M_sun * M_PI / 180.0;
+
+      // Equation of center
+      MMFLOAT C = (1.9146000 - 0.004817 * T - 0.000014 * T * T) * sin(M_sun_rad) + (0.019993 - 0.000101 * T) * sin(2.0 * M_sun_rad) + 0.00029 * sin(3.0 * M_sun_rad);
+
+      // Sun's true longitude
+      MMFLOAT sun_lon = L0_sun + C;
+
+      // Apparent longitude (add nutation and aberration)
+      MMFLOAT Omega_sun = 125.04 - 1934.136 * T;
+      MMFLOAT sun_lon_app = sun_lon - 0.00569 - 0.00478 * sin(Omega_sun * M_PI / 180.0);
+
+      // Obliquity of ecliptic
+      MMFLOAT eps0 = 23.439291 - 0.0130042 * T;
+      MMFLOAT eps_corr = eps0 + 0.00256 * cos(Omega_sun * M_PI / 180.0);
+
+      MMFLOAT sun_lon_rad = sun_lon_app * M_PI / 180.0;
+      MMFLOAT eps_rad = eps_corr * M_PI / 180.0;
+
+      // Convert to equatorial coordinates (Sun is on ecliptic, so beta = 0)
+      MMFLOAT ra_rad = atan2(cos(eps_rad) * sin(sun_lon_rad), cos(sun_lon_rad));
+      MMFLOAT dec_rad = asin(sin(eps_rad) * sin(sun_lon_rad));
+
+      celestial.RA = fmod(ra_rad * 12.0 / M_PI + 24.0, 24.0);
+      celestial.Dec = dec_rad * 180.0 / M_PI;
+
+      return celestial;
+    }
     default:
       celestial.RA = 0.0;
       celestial.Dec = 0.0;
@@ -1306,6 +1353,7 @@ void cmd_exec_star(int day, int month, int year, int hour, int minute, int secon
   MMFLOAT sidereal = getSiderealTime(day, month, year, hour, minute, second, longitude);
 
   if ((tp = checkstring(cmd, (unsigned char *)"MOON")) ||
+      (tp = checkstring(cmd, (unsigned char *)"SUN")) ||
       (tp = checkstring(cmd, (unsigned char *)"MERCURY")) ||
       (tp = checkstring(cmd, (unsigned char *)"VENUS")) ||
       (tp = checkstring(cmd, (unsigned char *)"MARS")) ||
@@ -1325,6 +1373,8 @@ void cmd_exec_star(int day, int month, int year, int hour, int minute, int secon
       StandardError(6);
     if (checkstring(cmd, (unsigned char *)"MOON"))
       star = getCelestialPosition(BODY_MOON, T, latitude, sidereal);
+    else if (checkstring(cmd, (unsigned char *)"SUN"))
+      star = getCelestialPosition(BODY_SUN, T, latitude, sidereal);
     else if (checkstring(cmd, (unsigned char *)"MERCURY"))
       star = getCelestialPosition(BODY_MERCURY, T, latitude, sidereal);
     else if (checkstring(cmd, (unsigned char *)"VENUS"))
@@ -1361,22 +1411,23 @@ void cmd_exec_star(int day, int month, int year, int hour, int minute, int secon
 
     // Get first character of star name from command (skip leading spaces)
     unsigned char *p = cmd;
-    while (*p == ' ') p++;
+    while (*p == ' ')
+      p++;
     if (*p == '\0')
       goto manual_entry; // No star name provided, fall through to manual entry
-    
+
     char firstChar = toupper(*p);
 
     // Binary search to find any star starting with this letter
     int low = 0;
     int high = numStars - 1;
     int foundIndex = -1;
-    
+
     while (low <= high)
     {
       int mid = (low + high) / 2;
       char catalogFirstChar = toupper(starCatalog[mid].name[0]);
-      
+
       if (catalogFirstChar == firstChar)
       {
         foundIndex = mid;

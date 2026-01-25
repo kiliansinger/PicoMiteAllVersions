@@ -44,6 +44,14 @@ OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
 #define ECB 1
 #include "aes.h"
 MMFLOAT PI;
+
+/* Stride-aware array access macros for struct member arrays */
+#define STRIDE_FLOAT(ptr, idx, stride) (*(MMFLOAT*)((char*)(ptr) + (idx) * (stride)))
+#define STRIDE_INT(ptr, idx, stride)   (*(long long int*)((char*)(ptr) + (idx) * (stride)))
+
+/* Forward declaration for stride-aware array parsing */
+int parsearrays_stride(unsigned char *tp, MMFLOAT **a1float, MMFLOAT **a2float, MMFLOAT **a3float, int64_t **a1int, int64_t **a2int, int64_t **a3int, int *s1, int *s2, int *s3);
+
 typedef MMFLOAT complex cplx;
 typedef float complex fcplx;
 void cmd_FFT(unsigned char *pp);
@@ -632,19 +640,51 @@ uint64_t crc64(const uint8_t *array, uint16_t length, const uint64_t polynome,
 	return crc;
 }
 #ifdef rp2350
-int parseintegerarray(unsigned char *tp, int64_t **a1int, int argno, int dimensions, int *dims, bool ConstantNotAllowed)
+int parseintegerarray(unsigned char *tp, int64_t **a1int, int argno, int dimensions, int *dims, bool ConstantNotAllowed, int *stride)
 {
 #else
-int parseintegerarray(unsigned char *tp, int64_t **a1int, int argno, int dimensions, short *dims, bool ConstantNotAllowed)
+int parseintegerarray(unsigned char *tp, int64_t **a1int, int argno, int dimensions, short *dims, bool ConstantNotAllowed, int *stride)
 {
 #endif
 	void *ptr1 = NULL;
 	int i, j;
+	if (stride) *stride = sizeof(int64_t);  // Default stride for normal arrays
 	ptr1 = findvar(tp, V_FIND | V_EMPTY_OK | V_NOFIND_ERR);
 	if ((g_vartbl[g_VarIndex].type & T_CONST) && ConstantNotAllowed)
 		StandardError(22);
 	if (dims == NULL)
 		dims = g_vartbl[g_VarIndex].dims;
+#ifdef STRUCTENABLED
+	// Check if this is a struct member access
+	if ((g_vartbl[g_VarIndex].type & T_STRUCT) && g_StructMemberType != 0)
+	{
+		// Caller must handle stride for struct member arrays
+		if (stride == NULL)
+			StandardError(47);
+		
+		// Verify member is integer type
+		if (!(g_StructMemberType & T_INT))
+			error("Argument % must be an integer array", argno);
+		
+		int struct_type = (int)g_vartbl[g_VarIndex].size;
+		int struct_size = g_structtbl[struct_type]->total_size;
+		*stride = struct_size;
+		
+		*a1int = (int64_t *)ptr1;
+		
+		// Calculate cardinality from struct array dimensions
+		int card = 1;
+		for (i = 0; i < MAXDIM; i++)
+		{
+			j = (g_vartbl[g_VarIndex].dims[i] - g_OptionBase + 1);
+			if (j > 0)
+				card *= j;
+			else
+				break;
+		}
+		return card;
+	}
+#endif
 	if (g_vartbl[g_VarIndex].type & T_INT)
 	{
 #ifdef rp2350
@@ -716,19 +756,54 @@ int parsestringarray(unsigned char *tp, unsigned char **a1str, int argno, int di
 }
 
 #ifdef rp2350
-int parsenumberarray(unsigned char *tp, MMFLOAT **a1float, int64_t **a1int, int argno, int dimensions, int *dims, bool ConstantNotAllowed)
+int parsenumberarray(unsigned char *tp, MMFLOAT **a1float, int64_t **a1int, int argno, int dimensions, int *dims, bool ConstantNotAllowed, int *stride)
 {
 #else
-int parsenumberarray(unsigned char *tp, MMFLOAT **a1float, int64_t **a1int, int argno, short dimensions, short *dims, bool ConstantNotAllowed)
+int parsenumberarray(unsigned char *tp, MMFLOAT **a1float, int64_t **a1int, int argno, short dimensions, short *dims, bool ConstantNotAllowed, int *stride)
 {
 #endif
 	void *ptr1 = NULL;
 	int i, j;
+	if (stride) *stride = sizeof(MMFLOAT);  // Default stride for normal arrays
 	ptr1 = findvar(tp, V_FIND | V_EMPTY_OK | V_NOFIND_ERR);
 	if ((g_vartbl[g_VarIndex].type & T_CONST) && ConstantNotAllowed)
 		StandardError(22);
 	if (dims == NULL)
 		dims = g_vartbl[g_VarIndex].dims;
+#ifdef STRUCTENABLED
+	// Check if this is a struct member access
+	if ((g_vartbl[g_VarIndex].type & T_STRUCT) && g_StructMemberType != 0)
+	{
+		// Caller must handle stride for struct member arrays
+		if (stride == NULL)
+			StandardError(47);
+		
+		// Verify member is numeric type
+		if (!(g_StructMemberType & (T_INT | T_NBR)))
+			error("Argument % must be a numerical array", argno);
+		
+		int struct_type = (int)g_vartbl[g_VarIndex].size;
+		int struct_size = g_structtbl[struct_type]->total_size;
+		*stride = struct_size;
+		
+		if (g_StructMemberType & T_NBR)
+			*a1float = (MMFLOAT *)ptr1;
+		else
+			*a1int = (int64_t *)ptr1;
+		
+		// Calculate cardinality from struct array dimensions
+		int card = 1;
+		for (i = 0; i < MAXDIM; i++)
+		{
+			j = (g_vartbl[g_VarIndex].dims[i] - g_OptionBase + 1);
+			if (j > 0)
+				card *= j;
+			else
+				break;
+		}
+		return card;
+	}
+#endif
 	if (g_vartbl[g_VarIndex].type & (T_INT | T_NBR))
 	{
 #ifdef rp2350
@@ -760,19 +835,51 @@ int parsenumberarray(unsigned char *tp, MMFLOAT **a1float, int64_t **a1int, int 
 	return card;
 }
 #ifdef rp2350
-int parsefloatarray(unsigned char *tp, MMFLOAT **a1float, int argno, int dimensions, int *dims, bool ConstantNotAllowed)
+int parsefloatarray(unsigned char *tp, MMFLOAT **a1float, int argno, int dimensions, int *dims, bool ConstantNotAllowed, int *stride)
 {
 #else
-int parsefloatarray(unsigned char *tp, MMFLOAT **a1float, int argno, int dimensions, short *dims, bool ConstantNotAllowed)
+int parsefloatarray(unsigned char *tp, MMFLOAT **a1float, int argno, int dimensions, short *dims, bool ConstantNotAllowed, int *stride)
 {
 #endif
 	void *ptr1 = NULL;
 	int i, j;
+	if (stride) *stride = sizeof(MMFLOAT);  // Default stride for normal arrays
 	ptr1 = findvar(tp, V_FIND | V_EMPTY_OK | V_NOFIND_ERR);
 	if ((g_vartbl[g_VarIndex].type & T_CONST) && ConstantNotAllowed)
 		StandardError(22);
 	if (dims == NULL)
 		dims = g_vartbl[g_VarIndex].dims;
+#ifdef STRUCTENABLED
+	// Check if this is a struct member access
+	if ((g_vartbl[g_VarIndex].type & T_STRUCT) && g_StructMemberType != 0)
+	{
+		// Caller must handle stride for struct member arrays
+		if (stride == NULL)
+			StandardError(47);
+		
+		// Verify member is float type
+		if (!(g_StructMemberType & T_NBR))
+			error("Argument % must be a floating point array", argno);
+		
+		int struct_type = (int)g_vartbl[g_VarIndex].size;
+		int struct_size = g_structtbl[struct_type]->total_size;
+		*stride = struct_size;
+		
+		*a1float = (MMFLOAT *)ptr1;
+		
+		// Calculate cardinality from struct array dimensions
+		int card = 1;
+		for (i = 0; i < MAXDIM; i++)
+		{
+			j = (g_vartbl[g_VarIndex].dims[i] - g_OptionBase + 1);
+			if (j > 0)
+				card *= j;
+			else
+				break;
+		}
+		return card;
+	}
+#endif
 	if (g_vartbl[g_VarIndex].type & T_NBR)
 	{
 #ifdef rp2350
@@ -964,13 +1071,18 @@ int sinc_filter_interpolate(const MMFLOAT *x_in, const MMFLOAT *y_in, int n, int
 
 int parsearrays(unsigned char *tp, MMFLOAT **a1float, MMFLOAT **a2float, MMFLOAT **a3float, int64_t **a1int, int64_t **a2int, int64_t **a3int)
 {
+	return parsearrays_stride(tp, a1float, a2float, a3float, a1int, a2int, a3int, NULL, NULL, NULL);
+}
+
+int parsearrays_stride(unsigned char *tp, MMFLOAT **a1float, MMFLOAT **a2float, MMFLOAT **a3float, int64_t **a1int, int64_t **a2int, int64_t **a3int, int *s1, int *s2, int *s3)
+{
 	int card1, card2, card3;
 	getcsargs(&tp, 5);
 	if (!(argc == 5))
 		StandardError(2);
-	card1 = parsenumberarray(argv[0], a1float, a1int, 1, 0, NULL, false);
-	card2 = parsenumberarray(argv[2], a2float, a2int, 2, 0, NULL, false);
-	card3 = parsenumberarray(argv[4], a3float, a3int, 3, 0, NULL, true);
+	card1 = parsenumberarray(argv[0], a1float, a1int, 1, 0, NULL, false, s1);
+	card2 = parsenumberarray(argv[2], a2float, a2int, 2, 0, NULL, false, s2);
+	card3 = parsenumberarray(argv[4], a3float, a3int, 3, 0, NULL, true, s3);
 	if (!(card1 == card2 && card2 == card3))
 		StandardError(16);
 	if (!((*a3float == NULL && *a2float == NULL && *a1float == NULL) || (*a3int == NULL && *a2int == NULL && *a1int == NULL)))
@@ -1424,22 +1536,22 @@ void cmd_math(void)
 			if (frequency <= 0.0 || frequency > 0.5)
 				error("Frequency must be >0 and <=0.5");
 
-			if (parsefloatarray(argv[0], &a1float, 1, 1, NULL, false) < n)
+			if (parsefloatarray(argv[0], &a1float, 1, 1, NULL, false, NULL) < n)
 				StandardError(17);
-			if (parsefloatarray(argv[2], &a2float, 2, 1, NULL, false) < n)
+			if (parsefloatarray(argv[2], &a2float, 2, 1, NULL, false, NULL) < n)
 				StandardError(17);
 			if (argc == 13)
 			{
-				if (parsefloatarray(argv[10], &a3float, 3, 1, NULL, true) < m)
+				if (parsefloatarray(argv[10], &a3float, 3, 1, NULL, true, NULL) < m)
 					StandardError(17);
-				if (parsefloatarray(argv[12], &a4float, 4, 1, NULL, true) < m)
+				if (parsefloatarray(argv[12], &a4float, 4, 1, NULL, true, NULL) < m)
 					StandardError(17);
 			}
 			else
 			{
-				if (parsefloatarray(argv[12], &a3float, 3, 1, NULL, true) < m)
+				if (parsefloatarray(argv[12], &a3float, 3, 1, NULL, true, NULL) < m)
 					StandardError(17);
-				if (parsefloatarray(argv[14], &a4float, 4, 1, NULL, true) < m)
+				if (parsefloatarray(argv[14], &a4float, 4, 1, NULL, true, NULL) < m)
 					StandardError(17);
 			}
 
@@ -1456,17 +1568,18 @@ void cmd_math(void)
 			int i, card1 = 1, card2 = 1;
 			MMFLOAT *a1float = NULL, *a2float = NULL, scale;
 			int64_t *a1int = NULL, *a2int = NULL;
+			int s1, s2;
 			getcsargs(&tp, 5);
 			if (!(argc == 5))
 				StandardError(2);
-			card1 = parsenumberarray(argv[0], &a1float, &a1int, 1, 0, dims, false);
+			card1 = parsenumberarray(argv[0], &a1float, &a1int, 1, 0, dims, false, &s1);
 			evaluate(argv[2], &f, &i64, &s, &t, false);
 			if (t & T_STR)
 				SyntaxError();
 			scale = getnumber(argv[2]);
 			if ((MMFLOAT)i64 != scale)
 				t &= (~T_INT);
-			card2 = parsenumberarray(argv[4], &a2float, &a2int, 3, 0, dims, true);
+			card2 = parsenumberarray(argv[4], &a2float, &a2int, 3, 0, dims, true, &s2);
 			if (card1 != card2)
 				error("Size mismatch");
 			if (scale != 1.0)
@@ -1474,22 +1587,22 @@ void cmd_math(void)
 				if (a2float != NULL && a1float != NULL)
 				{
 					for (i = 0; i < card1; i++)
-						*a2float++ = ((t & T_INT) ? (MMFLOAT)i64 : f) * (*a1float++);
+						STRIDE_FLOAT(a2float, i, s2) = ((t & T_INT) ? (MMFLOAT)i64 : f) * STRIDE_FLOAT(a1float, i, s1);
 				}
 				else if (a2float != NULL && a1float == NULL)
 				{
 					for (i = 0; i < card1; i++)
-						(*a2float++) = ((t & T_INT) ? (MMFLOAT)i64 : f) * ((MMFLOAT)*a1int++);
+						STRIDE_FLOAT(a2float, i, s2) = ((t & T_INT) ? (MMFLOAT)i64 : f) * ((MMFLOAT)STRIDE_INT(a1int, i, s1));
 				}
 				else if (a2float == NULL && a1float != NULL)
 				{
 					for (i = 0; i < card1; i++)
-						(*a2int++) = FloatToInt64(((t & T_INT) ? i64 : f) * (*a1float++));
+						STRIDE_INT(a2int, i, s2) = FloatToInt64(((t & T_INT) ? i64 : f) * STRIDE_FLOAT(a1float, i, s1));
 				}
 				else
 				{
 					for (i = 0; i < card1; i++)
-						(*a2int++) = ((t & T_INT) ? i64 : f) * (*a1int++);
+						STRIDE_INT(a2int, i, s2) = ((t & T_INT) ? i64 : f) * STRIDE_INT(a1int, i, s1);
 				}
 			}
 			else
@@ -1497,22 +1610,22 @@ void cmd_math(void)
 				if (a2float != NULL && a1float != NULL)
 				{
 					for (i = 0; i < card1; i++)
-						*a2float++ = *a1float++;
+						STRIDE_FLOAT(a2float, i, s2) = STRIDE_FLOAT(a1float, i, s1);
 				}
 				else if (a2float != NULL && a1float == NULL)
 				{
 					for (i = 0; i < card1; i++)
-						(*a2float++) = ((MMFLOAT)*a1int++);
+						STRIDE_FLOAT(a2float, i, s2) = ((MMFLOAT)STRIDE_INT(a1int, i, s1));
 				}
 				else if (a2float == NULL && a1float != NULL)
 				{
 					for (i = 0; i < card1; i++)
-						(*a2int++) = FloatToInt64(*a1float++);
+						STRIDE_INT(a2int, i, s2) = FloatToInt64(STRIDE_FLOAT(a1float, i, s1));
 				}
 				else
 				{
 					for (i = 0; i < card1; i++)
-						*a2int++ = *a1int++;
+						STRIDE_INT(a2int, i, s2) = STRIDE_INT(a1int, i, s1);
 				}
 			}
 			return;
@@ -1525,10 +1638,10 @@ void cmd_math(void)
 			getcsargs(&tp, 7);
 			if (!(argc == 5 || argc == 7))
 				StandardError(2);
-			card1 = parseintegerarray(argv[0], &a1int, 1, 0, dims, false);
+			card1 = parseintegerarray(argv[0], &a1int, 1, 0, dims, false, NULL);
 			evaluate(argv[2], &f, &i64, &s, &t, false);
 			int shift = getint(argv[2], -63, 63);
-			card2 = parseintegerarray(argv[4], &a2int, 3, 0, dims, true);
+			card2 = parseintegerarray(argv[4], &a2int, 3, 0, dims, true, NULL);
 			if (card1 != card2)
 				error("Size mismatch");
 			if (shift > 0)
@@ -1571,19 +1684,20 @@ void cmd_math(void)
 		{
 			MMFLOAT *a1float = NULL, *a2float = NULL, *a3float = NULL;
 			int64_t *a1int = NULL, *a2int = NULL, *a3int = NULL;
-			int card = parsearrays(tp, &a1float, &a2float, &a3float, &a1int, &a2int, &a3int);
+			int s1, s2, s3;
+			int card = parsearrays_stride(tp, &a1float, &a2float, &a3float, &a1int, &a2int, &a3int, &s1, &s2, &s3);
 			if (a1float)
 			{
-				while (card--)
+				for (int i = 0; i < card; i++)
 				{
-					*a3float++ = *a1float++ + *a2float++;
+					STRIDE_FLOAT(a3float, i, s3) = STRIDE_FLOAT(a1float, i, s1) + STRIDE_FLOAT(a2float, i, s2);
 				}
 			}
 			else
 			{
-				while (card--)
+				for (int i = 0; i < card; i++)
 				{
-					*a3int++ = *a1int++ + *a2int++;
+					STRIDE_INT(a3int, i, s3) = STRIDE_INT(a1int, i, s1) + STRIDE_INT(a2int, i, s2);
 				}
 			}
 			return;
@@ -1596,19 +1710,20 @@ void cmd_math(void)
 				tp = tp1;
 			MMFLOAT *a1float = NULL, *a2float = NULL, *a3float = NULL;
 			int64_t *a1int = NULL, *a2int = NULL, *a3int = NULL;
-			int card = parsearrays(tp, &a1float, &a2float, &a3float, &a1int, &a2int, &a3int);
+			int s1, s2, s3;
+			int card = parsearrays_stride(tp, &a1float, &a2float, &a3float, &a1int, &a2int, &a3int, &s1, &s2, &s3);
 			if (a1float)
 			{
-				while (card--)
+				for (int i = 0; i < card; i++)
 				{
-					*a3float++ = *a1float++ * *a2float++;
+					STRIDE_FLOAT(a3float, i, s3) = STRIDE_FLOAT(a1float, i, s1) * STRIDE_FLOAT(a2float, i, s2);
 				}
 			}
 			else
 			{
-				while (card--)
+				for (int i = 0; i < card; i++)
 				{
-					*a3int++ = *a1int++ * *a2int++;
+					STRIDE_INT(a3int, i, s3) = STRIDE_INT(a1int, i, s1) * STRIDE_INT(a2int, i, s2);
 				}
 			}
 			return;
@@ -1684,19 +1799,20 @@ void cmd_math(void)
 		{
 			MMFLOAT *a1float = NULL, *a2float = NULL, *a3float = NULL;
 			int64_t *a1int = NULL, *a2int = NULL, *a3int = NULL;
-			int card = parsearrays(tp, &a1float, &a2float, &a3float, &a1int, &a2int, &a3int);
+			int s1, s2, s3;
+			int card = parsearrays_stride(tp, &a1float, &a2float, &a3float, &a1int, &a2int, &a3int, &s1, &s2, &s3);
 			if (a1float)
 			{
-				while (card--)
+				for (int i = 0; i < card; i++)
 				{
-					*a3float++ = *a1float++ - *a2float++;
+					STRIDE_FLOAT(a3float, i, s3) = STRIDE_FLOAT(a1float, i, s1) - STRIDE_FLOAT(a2float, i, s2);
 				}
 			}
 			else
 			{
-				while (card--)
+				for (int i = 0; i < card; i++)
 				{
-					*a3int++ = *a1int++ - *a2int++;
+					STRIDE_INT(a3int, i, s3) = STRIDE_INT(a1int, i, s1) - STRIDE_INT(a2int, i, s2);
 				}
 			}
 			return;
@@ -1706,19 +1822,20 @@ void cmd_math(void)
 		{
 			MMFLOAT *a1float = NULL, *a2float = NULL, *a3float = NULL;
 			int64_t *a1int = NULL, *a2int = NULL, *a3int = NULL;
-			int card = parsearrays(tp, &a1float, &a2float, &a3float, &a1int, &a2int, &a3int);
+			int s1, s2, s3;
+			int card = parsearrays_stride(tp, &a1float, &a2float, &a3float, &a1int, &a2int, &a3int, &s1, &s2, &s3);
 			if (a1float)
 			{
-				while (card--)
+				for (int i = 0; i < card; i++)
 				{
-					*a3float++ = *a1float++ / *a2float++;
+					STRIDE_FLOAT(a3float, i, s3) = STRIDE_FLOAT(a1float, i, s1) / STRIDE_FLOAT(a2float, i, s2);
 				}
 			}
 			else
 			{
-				while (card--)
+				for (int i = 0; i < card; i++)
 				{
-					*a3int++ = *a1int++ / *a2int++;
+					STRIDE_INT(a3int, i, s3) = STRIDE_INT(a1int, i, s1) / STRIDE_INT(a2int, i, s2);
 				}
 			}
 			return;
@@ -1734,13 +1851,13 @@ void cmd_math(void)
 			getcsargs(&tp, 5);
 			if (!(argc == 5))
 				StandardError(2);
-			parsefloatarray(argv[0], &a1float, 1, 2, dims, false);
+			parsefloatarray(argv[0], &a1float, 1, 2, dims, false, NULL);
 			numcols = dims[0] - g_OptionBase;
 			numrows = dims[1] - g_OptionBase;
-			parsefloatarray(argv[2], &a2float, 1, 1, dims, false);
+			parsefloatarray(argv[2], &a2float, 1, 1, dims, false, NULL);
 			if ((dims[0] - g_OptionBase) != numcols)
 				StandardError(16);
-			parsefloatarray(argv[4], &a3float, 1, 1, dims, true);
+			parsefloatarray(argv[4], &a3float, 1, 1, dims, true, NULL);
 			if ((dims[0] - g_OptionBase) != numrows)
 				StandardError(16);
 			if (a3float == a1float || a3float == a2float)
@@ -1773,35 +1890,36 @@ void cmd_math(void)
 			MMFLOAT angle = getnumber(argv[4]) / optionangle;
 			MMFLOAT *a1float = NULL, *xfout = NULL, *yfout = NULL, cangle = cos(angle), sangle = sin(angle), x, y;
 			int64_t *a1int = NULL, *xiout = NULL, *yiout = NULL;
-			int numpoints = parsenumberarray(argv[6], &a1float, &a1int, 4, 1, dims, false);
+			int sxin, syin, sxout, syout;
+			int numpoints = parsenumberarray(argv[6], &a1float, &a1int, 4, 1, dims, false, &sxin);
 			MMFLOAT *xin = GetTempMainMemory(numpoints * sizeof(MMFLOAT));
 			for (int i = 0; i < numpoints; i++)
-				xin[i] = (a1float != NULL ? a1float[i] - xorigin : (MMFLOAT)a1int[i] - xorigin);
+				xin[i] = (a1float != NULL ? STRIDE_FLOAT(a1float, i, sxin) - xorigin : (MMFLOAT)STRIDE_INT(a1int, i, sxin) - xorigin);
 			a1float = NULL;
 			a1int = NULL;
-			if (parsenumberarray(argv[8], &a1float, &a1int, 5, 1, dims, false) != numpoints)
+			if (parsenumberarray(argv[8], &a1float, &a1int, 5, 1, dims, false, &syin) != numpoints)
 				StandardError(16);
 			MMFLOAT *yin = GetTempMainMemory(numpoints * sizeof(MMFLOAT));
 			for (int i = 0; i < numpoints; i++)
-				yin[i] = (a1float != NULL ? a1float[i] - yorigin : (MMFLOAT)a1int[i] - yorigin);
+				yin[i] = (a1float != NULL ? STRIDE_FLOAT(a1float, i, syin) - yorigin : (MMFLOAT)STRIDE_INT(a1int, i, syin) - yorigin);
 			a1float = NULL;
 			a1int = NULL;
-			if (parsenumberarray(argv[10], &xfout, &xiout, 6, 1, dims, false) != numpoints)
+			if (parsenumberarray(argv[10], &xfout, &xiout, 6, 1, dims, false, &sxout) != numpoints)
 				StandardError(16);
-			if (parsenumberarray(argv[12], &yfout, &yiout, 7, 1, dims, false) != numpoints)
+			if (parsenumberarray(argv[12], &yfout, &yiout, 7, 1, dims, false, &syout) != numpoints)
 				StandardError(16);
 			for (int i = 0; i < numpoints; i++)
 			{
 				x = xin[i] * cangle - yin[i] * sangle + xorigin;
 				y = yin[i] * cangle + xin[i] * sangle + yorigin;
 				if (xfout)
-					xfout[i] = x;
+					STRIDE_FLOAT(xfout, i, sxout) = x;
 				else
-					xiout[i] = round(x);
+					STRIDE_INT(xiout, i, sxout) = round(x);
 				if (yfout)
-					yfout[i] = y;
+					STRIDE_FLOAT(yfout, i, syout) = y;
 				else
-					yiout[i] = round(y);
+					STRIDE_INT(yiout, i, syout) = round(y);
 			}
 			return;
 		}
@@ -1813,9 +1931,9 @@ void cmd_math(void)
 			getcsargs(&tp, 3);
 			if (!(argc == 3))
 				StandardError(2);
-			numrows = parsefloatarray(argv[0], &a1float, 1, 1, dims, false);
+			numrows = parsefloatarray(argv[0], &a1float, 1, 1, dims, false, NULL);
 			a1sfloat = a1float;
-			card2 = parsefloatarray(argv[2], &a2float, 2, 1, dims, true);
+			card2 = parsefloatarray(argv[2], &a2float, 2, 1, dims, true, NULL);
 			if (numrows != card2)
 				StandardError(16);
 			for (j = 0; j < numrows; j++)
@@ -1840,13 +1958,13 @@ void cmd_math(void)
 			getcsargs(&tp, 5);
 			if (!(argc == 5))
 				StandardError(2);
-			numcols = parsefloatarray(argv[0], &a1float, 1, 1, dims, false);
+			numcols = parsefloatarray(argv[0], &a1float, 1, 1, dims, false, NULL);
 			if (numcols != 3)
 				error("Argument 1 must be a 3 element floating point array");
-			numcols = parsefloatarray(argv[2], &a2float, 2, 1, dims, false);
+			numcols = parsefloatarray(argv[2], &a2float, 2, 1, dims, false, NULL);
 			if (numcols != 3)
 				error("Argument 2 must be a 3 element floating point array");
-			numcols = parsefloatarray(argv[4], &a3float, 3, 1, dims, true);
+			numcols = parsefloatarray(argv[4], &a3float, 3, 1, dims, true, NULL);
 			if (numcols != 3)
 				error("Argument 3 must be a 3 element floating point array");
 			for (j = 0; j < numcols; j++)
@@ -1868,7 +1986,7 @@ void cmd_math(void)
 			getcsargs(&tp, 3);
 			if (!(argc == 1 || argc == 3))
 				StandardError(2);
-			numcols = parsenumberarray(argv[0], &a1float, &a1int, 1, 1, dims, false);
+			numcols = parsenumberarray(argv[0], &a1float, &a1int, 1, 1, dims, false, NULL);
 			if (a1float != NULL)
 			{
 				if (argc == 3)
@@ -1914,10 +2032,10 @@ void cmd_math(void)
 			getcsargs(&tp, 3);
 			if (!(argc == 3))
 				StandardError(2);
-			parsefloatarray(argv[0], &a1float, 1, 2, dims, false);
+			parsefloatarray(argv[0], &a1float, 1, 2, dims, false, NULL);
 			numcols = dims[0] - g_OptionBase;
 			numrows = dims[1] - g_OptionBase;
-			parsefloatarray(argv[2], &a2float, 2, 2, dims, true);
+			parsefloatarray(argv[2], &a2float, 2, 2, dims, true, NULL);
 			if (dims[0] - g_OptionBase != numcols || dims[1] - g_OptionBase != numrows)
 				StandardError(16);
 			if (numcols != numrows)
@@ -1961,10 +2079,10 @@ void cmd_math(void)
 			getcsargs(&tp, 3);
 			if (!(argc == 3))
 				StandardError(2);
-			parsefloatarray(argv[0], &a1float, 1, 2, dims, false);
+			parsefloatarray(argv[0], &a1float, 1, 2, dims, false, NULL);
 			numcols1 = numrows2 = dims[0] - g_OptionBase;
 			numrows1 = numcols2 = dims[1] - g_OptionBase;
-			parsefloatarray(argv[2], &a2float, 2, 2, dims, true);
+			parsefloatarray(argv[2], &a2float, 2, 2, dims, true, NULL);
 			if (numcols2 != dims[0] - g_OptionBase)
 				StandardError(16);
 			if (numrows2 != dims[1] - g_OptionBase)
@@ -2009,15 +2127,15 @@ void cmd_math(void)
 			getcsargs(&tp, 5);
 			if (!(argc == 5))
 				StandardError(2);
-			parsefloatarray(argv[0], &a1float, 1, 2, dims, false);
+			parsefloatarray(argv[0], &a1float, 1, 2, dims, false, NULL);
 			numcols1 = numrows2 = dims[0] - g_OptionBase + 1;
 			numrows1 = dims[1] - g_OptionBase + 1;
-			parsefloatarray(argv[2], &a2float, 2, 2, dims, false);
+			parsefloatarray(argv[2], &a2float, 2, 2, dims, false, NULL);
 			numcols2 = dims[0] - g_OptionBase + 1;
 			numrows2 = dims[1] - g_OptionBase + 1;
 			if (numrows2 != numcols1)
 				error("Input array size mismatch");
-			parsefloatarray(argv[4], &a3float, 3, 2, dims, true);
+			parsefloatarray(argv[4], &a3float, 3, 2, dims, true, NULL);
 			numcols3 = dims[0] - g_OptionBase + 1;
 			numrows3 = dims[1] - g_OptionBase + 1;
 			if (numcols3 != numcols2 || numrows3 != numrows1)
@@ -2070,7 +2188,7 @@ void cmd_math(void)
 			getcsargs(&tp, 1);
 			if (!(argc == 1))
 				StandardError(2);
-			parsenumberarray(argv[0], &a1float, &a1int, 1, 2, dims, false);
+			parsenumberarray(argv[0], &a1float, &a1int, 1, 2, dims, false, NULL);
 			numcols = dims[0] + 1 - g_OptionBase;
 			numrows = dims[1] + 1 - g_OptionBase;
 			//			MMFLOAT **matrix=alloc2df(numcols,numrows);
@@ -2128,10 +2246,10 @@ void cmd_math(void)
 			getcsargs(&tp, 3);
 			if (!(argc == 3))
 				StandardError(2);
-			card = parsefloatarray(argv[0], &q, 1, 1, dims, false);
+			card = parsefloatarray(argv[0], &q, 1, 1, dims, false, NULL);
 			if (card != 5)
 				StandardErrorParam(41, 1);
-			card = parsefloatarray(argv[2], &n, 2, 1, dims, true);
+			card = parsefloatarray(argv[2], &n, 2, 1, dims, true, NULL);
 			if (card != 5)
 				StandardErrorParam(41, 2);
 			Q_Invert(q, n);
@@ -2150,7 +2268,7 @@ void cmd_math(void)
 			MMFLOAT x = getnumber(argv[0]);
 			MMFLOAT y = getnumber(argv[2]);
 			MMFLOAT z = getnumber(argv[4]);
-			card = parsefloatarray(argv[6], &q, 4, 1, dims, true);
+			card = parsefloatarray(argv[6], &q, 4, 1, dims, true, NULL);
 			if (card != 5)
 				StandardErrorParam(41, 4);
 			mag = sqrt(x * x + y * y + z * z); // calculate the magnitude
@@ -2173,7 +2291,7 @@ void cmd_math(void)
 			MMFLOAT yaw = -getnumber(argv[0]) / optionangle;
 			MMFLOAT pitch = getnumber(argv[2]) / optionangle;
 			MMFLOAT roll = getnumber(argv[4]) / optionangle;
-			card = parsefloatarray(argv[6], &q, 4, 1, dims, true);
+			card = parsefloatarray(argv[6], &q, 4, 1, dims, true, NULL);
 			if (card != 5)
 				StandardErrorParam(41, 4);
 			MMFLOAT s1 = sin(pitch / 2);
@@ -2203,7 +2321,7 @@ void cmd_math(void)
 			MMFLOAT x = getnumber(argv[2]);
 			MMFLOAT y = getnumber(argv[4]);
 			MMFLOAT z = getnumber(argv[6]);
-			card = parsefloatarray(argv[8], &q, 5, 1, dims, true);
+			card = parsefloatarray(argv[8], &q, 5, 1, dims, true, NULL);
 			if (card != 5)
 				StandardErrorParam(41, 4);
 			MMFLOAT sineterm = sin(theta / 2.0 / optionangle);
@@ -2228,13 +2346,13 @@ void cmd_math(void)
 			getcsargs(&tp, 5);
 			if (!(argc == 5))
 				StandardError(2);
-			card = parsefloatarray(argv[0], &q1, 1, 1, dims, false);
+			card = parsefloatarray(argv[0], &q1, 1, 1, dims, false, NULL);
 			if (card != 5)
 				StandardErrorParam(41, 1);
-			card = parsefloatarray(argv[2], &q2, 2, 1, dims, false);
+			card = parsefloatarray(argv[2], &q2, 2, 1, dims, false, NULL);
 			if (card != 5)
 				StandardErrorParam(41, 2);
-			card = parsefloatarray(argv[4], &n, 31, 1, dims, true);
+			card = parsefloatarray(argv[4], &n, 31, 1, dims, true, NULL);
 			if (card != 5)
 				StandardErrorParam(41, 3);
 			Q_Mult(q1, q2, n);
@@ -2250,13 +2368,13 @@ void cmd_math(void)
 			getcsargs(&tp, 5);
 			if (!(argc == 5))
 				StandardError(2);
-			card = parsefloatarray(argv[0], &q1, 1, 1, dims, false);
+			card = parsefloatarray(argv[0], &q1, 1, 1, dims, false, NULL);
 			if (card != 5)
 				StandardErrorParam(41, 1);
-			card = parsefloatarray(argv[2], &v1, 2, 1, dims, false);
+			card = parsefloatarray(argv[2], &v1, 2, 1, dims, false, NULL);
 			if (card != 5)
 				StandardErrorParam(41, 2);
-			card = parsefloatarray(argv[4], &n, 31, 1, dims, true);
+			card = parsefloatarray(argv[4], &n, 31, 1, dims, true, NULL);
 			if (card != 5)
 				StandardErrorParam(41, 3);
 			Q_Mult(q1, v1, temp);
@@ -2374,7 +2492,7 @@ void cmd_math(void)
 					error("Syntax");
 				MMFLOAT *q1 = NULL;
 				int channel = getint(argv[0], 1, MAXPID);
-				int card = parsefloatarray(argv[2], &q1, 2, 1, NULL, true);
+				int card = parsefloatarray(argv[2], &q1, 2, 1, NULL, true, NULL);
 				PIDchannels[channel].PIDparams = (PIDController *)q1;
 				if (card != 14)
 					error("Argument 2 must be a 14 element floating point array");
@@ -2398,16 +2516,17 @@ void cmd_math(void)
 			int i, card1 = 1, card2 = 1;
 			MMFLOAT *a1float = NULL, *a2float = NULL, scale;
 			int64_t *a1int = NULL, *a2int = NULL;
+			int s1, s2;
 			getcsargs(&tp, 5);
 			if (!(argc == 5))
 				StandardError(2);
-			card1 = parsenumberarray(argv[0], &a1float, &a1int, 1, 0, dims, false);
+			card1 = parsenumberarray(argv[0], &a1float, &a1int, 1, 0, dims, false, &s1);
 			evaluate(argv[2], &f, &i64, &s, &t, false);
 			if (t & T_STR)
 				SyntaxError();
 			;
 			scale = getnumber(argv[2]);
-			card2 = parsenumberarray(argv[4], &a2float, &a2int, 3, 0, dims, true);
+			card2 = parsenumberarray(argv[4], &a2float, &a2int, 3, 0, dims, true, &s2);
 			if (card1 != card2)
 				StandardError(16);
 			if (scale != 1.0)
@@ -2415,22 +2534,22 @@ void cmd_math(void)
 				if (a2float != NULL && a1float != NULL)
 				{
 					for (i = 0; i < card1; i++)
-						*a2float++ = pow(*a1float++, (t & T_INT) ? (MMFLOAT)i64 : f);
+						STRIDE_FLOAT(a2float, i, s2) = pow(STRIDE_FLOAT(a1float, i, s1), (t & T_INT) ? (MMFLOAT)i64 : f);
 				}
 				else if (a2float != NULL && a1float == NULL)
 				{
 					for (i = 0; i < card1; i++)
-						(*a2float++) = pow((MMFLOAT)*a1int++, ((t & T_INT) ? (MMFLOAT)i64 : f));
+						STRIDE_FLOAT(a2float, i, s2) = pow((MMFLOAT)STRIDE_INT(a1int, i, s1), ((t & T_INT) ? (MMFLOAT)i64 : f));
 				}
 				else if (a2float == NULL && a1float != NULL)
 				{
 					for (i = 0; i < card1; i++)
-						(*a2int++) = FloatToInt64(pow(*a1float++, ((t & T_INT) ? i64 : FloatToInt64(f))));
+						STRIDE_INT(a2int, i, s2) = FloatToInt64(pow(STRIDE_FLOAT(a1float, i, s1), ((t & T_INT) ? i64 : FloatToInt64(f))));
 				}
 				else
 				{
 					for (i = 0; i < card1; i++)
-						(*a2int++) = FloatToInt64(pow(*a1int++, (t & T_INT) ? i64 : FloatToInt64(f)));
+						STRIDE_INT(a2int, i, s2) = FloatToInt64(pow(STRIDE_INT(a1int, i, s1), (t & T_INT) ? i64 : FloatToInt64(f)));
 				}
 			}
 			else
@@ -2438,22 +2557,22 @@ void cmd_math(void)
 				if (a2float != NULL && a1float != NULL)
 				{
 					for (i = 0; i < card1; i++)
-						*a2float++ = *a1float++;
+						STRIDE_FLOAT(a2float, i, s2) = STRIDE_FLOAT(a1float, i, s1);
 				}
 				else if (a2float != NULL && a1float == NULL)
 				{
 					for (i = 0; i < card1; i++)
-						(*a2float++) = ((MMFLOAT)*a1int++);
+						STRIDE_FLOAT(a2float, i, s2) = ((MMFLOAT)STRIDE_INT(a1int, i, s1));
 				}
 				else if (a2float == NULL && a1float != NULL)
 				{
 					for (i = 0; i < card1; i++)
-						(*a2int++) = FloatToInt64(*a1float++);
+						STRIDE_INT(a2int, i, s2) = FloatToInt64(STRIDE_FLOAT(a1float, i, s1));
 				}
 				else
 				{
 					for (i = 0; i < card1; i++)
-						*a2int++ = *a1int++;
+						STRIDE_INT(a2int, i, s2) = STRIDE_INT(a1int, i, s1);
 				}
 			}
 			return;
@@ -2465,45 +2584,58 @@ void cmd_math(void)
 			int i, card1 = 1, card2 = 1;
 			MMFLOAT *a1float = NULL, *a2float = NULL, outmin, outmax, inmin = 1.5e+308, inmax = -1.5e308;
 			int64_t *a1int = NULL, *a2int = NULL;
+			int s1, s2;
+			MMFLOAT val;
 			getcsargs(&tp, 11);
 			if (!(argc == 7 || argc == 11))
 				StandardError(2);
-			card1 = parsenumberarray(argv[0], &a1float, &a1int, 1, 0, dims, false);
+			card1 = parsenumberarray(argv[0], &a1float, &a1int, 1, 0, dims, false, &s1);
 			outmin = getnumber(argv[2]);
 			outmax = getnumber(argv[4]);
-			card2 = parsenumberarray(argv[6], &a2float, &a2int, 4, 0, dims, true);
+			card2 = parsenumberarray(argv[6], &a2float, &a2int, 4, 0, dims, true, &s2);
 			if (card1 != card2)
 				error("Size mismatch");
 			for (i = 0; i < card1; i++)
 			{
 				if (a1float != NULL)
 				{ // find min and max if in is a float
-					if (a1float[i] < inmin)
-						inmin = a1float[i];
-					if (a1float[i] > inmax)
-						inmax = a1float[i];
+					val = STRIDE_FLOAT(a1float, i, s1);
+					if (val < inmin)
+						inmin = val;
+					if (val > inmax)
+						inmax = val;
 				}
 				else
 				{
-					if (a1int[i] < inmin)
-						inmin = (MMFLOAT)a1int[i];
-					if (a1int[i] > inmax)
-						inmax = (MMFLOAT)a1int[i];
+					val = (MMFLOAT)STRIDE_INT(a1int, i, s1);
+					if (val < inmin)
+						inmin = val;
+					if (val > inmax)
+						inmax = val;
 				}
 			}
 			if (argc == 11)
 			{
+				int scale_vtype;
 				void *ptr1 = findvar(argv[8], V_FIND);
-				if (!(g_vartbl[g_VarIndex].type & (T_NBR | T_INT)))
+				scale_vtype = g_vartbl[g_VarIndex].type;
+#ifdef STRUCTENABLED
+				if (g_StructMemberType != 0) scale_vtype = g_StructMemberType;
+#endif
+				if (!(scale_vtype & (T_NBR | T_INT)))
 					StandardError(6);
-				if (g_vartbl[g_VarIndex].type == T_INT)
+				if (scale_vtype & T_INT)
 					*(long long int *)ptr1 = (long long int)inmin;
 				else
 					*(MMFLOAT *)ptr1 = inmin;
 				void *ptr2 = findvar(argv[10], V_FIND);
-				if (!(g_vartbl[g_VarIndex].type & (T_NBR | T_INT)))
+				scale_vtype = g_vartbl[g_VarIndex].type;
+#ifdef STRUCTENABLED
+				if (g_StructMemberType != 0) scale_vtype = g_StructMemberType;
+#endif
+				if (!(scale_vtype & (T_NBR | T_INT)))
 					StandardError(6);
-				if (g_vartbl[g_VarIndex].type == T_INT)
+				if (scale_vtype & T_INT)
 					*(long long int *)ptr2 = (long long int)inmax;
 				else
 					*(MMFLOAT *)ptr2 = inmax;
@@ -2511,22 +2643,22 @@ void cmd_math(void)
 			if (a2float != NULL && a1float != NULL)
 			{ // in and out are floats
 				for (i = 0; i < card1; i++)
-					a2float[i] = ((a1float[i] - inmin) / (inmax - inmin)) * (outmax - outmin) + outmin;
+					STRIDE_FLOAT(a2float, i, s2) = ((STRIDE_FLOAT(a1float, i, s1) - inmin) / (inmax - inmin)) * (outmax - outmin) + outmin;
 			}
 			else if (a2float == NULL && a1float != NULL)
 			{ // in is a float and out is an integer
 				for (i = 0; i < card1; i++)
-					a2int[i] = (long long int)(((a1float[i] - inmin) / (inmax - inmin)) * (outmax - outmin) + outmin);
+					STRIDE_INT(a2int, i, s2) = (long long int)(((STRIDE_FLOAT(a1float, i, s1) - inmin) / (inmax - inmin)) * (outmax - outmin) + outmin);
 			}
 			else if (a2float != NULL && a1float == NULL)
 			{ // in is an integer and out is a float
 				for (i = 0; i < card1; i++)
-					a2float[i] = ((((MMFLOAT)a1int[i] - inmin) / (inmax - inmin)) * (outmax - outmin) + outmin);
+					STRIDE_FLOAT(a2float, i, s2) = ((((MMFLOAT)STRIDE_INT(a1int, i, s1) - inmin) / (inmax - inmin)) * (outmax - outmin) + outmin);
 			}
 			else
 			{ // in and out are integers
 				for (i = 0; i < card1; i++)
-					a2int[i] = (long long int)((((MMFLOAT)a1int[i] - inmin) / (inmax - inmin)) * (outmax - outmin) + outmin);
+					STRIDE_INT(a2int, i, s2) = (long long int)((((MMFLOAT)STRIDE_INT(a1int, i, s1) - inmin) / (inmax - inmin)) * (outmax - outmin) + outmin);
 			}
 			return;
 		}
@@ -2556,14 +2688,14 @@ void cmd_math(void)
 			getcsargs(&tp, 7);
 			if (!(argc == 7))
 				StandardError(2);
-			card1 = parsenumberarray(argv[0], &a1float, &a1int, 1, 0, dims, false);
+			card1 = parsenumberarray(argv[0], &a1float, &a1int, 1, 0, dims, false, NULL);
 			evaluate(argv[4], &f, &i64, &s, &t, false);
 			if (t & T_STR)
 				SyntaxError();
 			;
 			scale = getnumber(argv[4]);
-			card2 = parsenumberarray(argv[2], &a2float, &a2int, 3, 0, dims, false);
-			card3 = parsenumberarray(argv[6], &a3float, &a3int, 4, 0, dims, true);
+			card2 = parsenumberarray(argv[2], &a2float, &a2int, 3, 0, dims, false, NULL);
+			card3 = parsenumberarray(argv[6], &a3float, &a3int, 4, 0, dims, true, NULL);
 			if ((card1 != card2) || (card1 != card3))
 				error("Size mismatch");
 			if (a3int != NULL)
@@ -3116,7 +3248,7 @@ void fun_math(void)
 				direction = getint(argv[4], -1, 1);
 			if (direction == 0)
 				error("Valid are -1 and 1");
-			arraylength = parsenumberarray(argv[0], &a1float, &a1int, 1, 1, dims, false);
+			arraylength = parsenumberarray(argv[0], &a1float, &a1int, 1, 1, dims, false, NULL);
 			for (int i = 0; i < arraylength - 3; i++)
 			{
 				if (a1float)
@@ -3205,8 +3337,8 @@ void fun_math(void)
 			getcsargs(&tp, 3);
 			if (!(argc == 3))
 				StandardError(2);
-			card1 = parsenumberarray(argv[0], &a1float, &a1int, 1, 0, dims, false);
-			card2 = parsenumberarray(argv[2], &a2float, &a2int, 2, 0, dims, false);
+			card1 = parsenumberarray(argv[0], &a1float, &a1int, 1, 0, dims, false, NULL);
+			card2 = parsenumberarray(argv[2], &a2float, &a2int, 2, 0, dims, false, NULL);
 			if (card1 != card2)
 				StandardError(16);
 			a3float = GetTempMainMemory(card1 * sizeof(MMFLOAT));
@@ -3268,7 +3400,7 @@ void fun_math(void)
 				getcsargs(&tp, 1);
 				if (!(argc == 1))
 					StandardError(2);
-				parsenumberarray(argv[0], &a1float, &a1int, 1, 2, dims, false);
+				parsenumberarray(argv[0], &a1float, &a1int, 1, 2, dims, false, NULL);
 				numcols = dims[0];
 				numrows = dims[1];
 				df = numcols * numrows;
@@ -3356,8 +3488,8 @@ void fun_math(void)
 			getcsargs(&tp, 3);
 			if (!(argc == 3))
 				StandardError(2);
-			card1 = parsefloatarray(argv[0], &a1float, 1, 1, dims, false);
-			card2 = parsefloatarray(argv[2], &a2float, 2, 1, dims, false);
+			card1 = parsefloatarray(argv[0], &a1float, 1, 1, dims, false, NULL);
+			card2 = parsefloatarray(argv[2], &a2float, 2, 1, dims, false, NULL);
 			if (card1 != card2)
 				StandardError(16);
 			fret = 0;
@@ -3397,7 +3529,7 @@ void fun_math(void)
 			getcsargs(&tp, 1);
 			if (!(argc == 1))
 				StandardError(2);
-			parsefloatarray(argv[0], &a1float, 1, 2, dims, false);
+			parsefloatarray(argv[0], &a1float, 1, 2, dims, false, NULL);
 			numcols = dims[0] + 1 - g_OptionBase;
 			numrows = dims[1] + 1 - g_OptionBase;
 			if (numcols != numrows)
@@ -3422,20 +3554,26 @@ void fun_math(void)
 		if (tp)
 		{
 			int i, card1 = 1;
-			MMFLOAT *a1float = NULL, max = -3.0e+38;
+			MMFLOAT *a1float = NULL, max = -3.0e+38, val;
 			int64_t *a1int = NULL;
 			long long int *temp = NULL;
+			int s1;
 			getcsargs(&tp, 3);
 			//			if(!(argc == 1)) StandardError(2);
-			card1 = parsenumberarray(argv[0], &a1float, &a1int, 1, 0, dims, false);
+			card1 = parsenumberarray(argv[0], &a1float, &a1int, 1, 0, dims, false, &s1);
 			if (argc == 3)
 			{
+				int max_vtype;
 				if (dims[1] > 0)
 				{ // Not an array
 					error("Argument 1 must be a 1D numerical array");
 				}
 				temp = findvar(argv[2], V_FIND);
-				if (!(g_vartbl[g_VarIndex].type & T_INT))
+				max_vtype = g_vartbl[g_VarIndex].type;
+#ifdef STRUCTENABLED
+				if (g_StructMemberType != 0) max_vtype = g_StructMemberType;
+#endif
+				if (!(max_vtype & T_INT))
 					StandardError(6);
 			}
 
@@ -3443,30 +3581,30 @@ void fun_math(void)
 			{
 				for (i = 0; i < card1; i++)
 				{
-					if ((*a1float) > max)
+					val = STRIDE_FLOAT(a1float, i, s1);
+					if (val > max)
 					{
-						max = (*a1float);
+						max = val;
 						if (temp != NULL)
 						{
 							*temp = i + g_OptionBase;
 						}
 					}
-					a1float++;
 				}
 			}
 			else
 			{
 				for (i = 0; i < card1; i++)
 				{
-					if (((MMFLOAT)(*a1int)) > max)
+					val = (MMFLOAT)STRIDE_INT(a1int, i, s1);
+					if (val > max)
 					{
-						max = (MMFLOAT)(*a1int);
+						max = val;
 						if (temp != NULL)
 						{
 							*temp = i + g_OptionBase;
 						}
 					}
-					a1int++;
 				}
 			}
 			targ = T_NBR;
@@ -3477,50 +3615,56 @@ void fun_math(void)
 		if (tp)
 		{
 			int i, card1 = 1;
-			MMFLOAT *a1float = NULL, min = 3.0e+38;
+			MMFLOAT *a1float = NULL, min = 3.0e+38, val;
 			int64_t *a1int = NULL;
 			long long int *temp = NULL;
+			int s1;
 			getcsargs(&tp, 3);
 			//			if(!(argc == 1)) StandardError(2);
-			card1 = parsenumberarray(argv[0], &a1float, &a1int, 1, 0, dims, false);
+			card1 = parsenumberarray(argv[0], &a1float, &a1int, 1, 0, dims, false, &s1);
 			if (argc == 3)
 			{
+				int min_vtype;
 				if (dims[1] > 0)
 				{ // Not an array
 					error("Argument 1 must be a 1D numerical array");
 				}
 				temp = findvar(argv[2], V_FIND);
-				if (!(g_vartbl[g_VarIndex].type & T_INT))
+				min_vtype = g_vartbl[g_VarIndex].type;
+#ifdef STRUCTENABLED
+				if (g_StructMemberType != 0) min_vtype = g_StructMemberType;
+#endif
+				if (!(min_vtype & T_INT))
 					StandardError(6);
 			}
 			if (a1float != NULL)
 			{
 				for (i = 0; i < card1; i++)
 				{
-					if ((*a1float) < min)
+					val = STRIDE_FLOAT(a1float, i, s1);
+					if (val < min)
 					{
-						min = (*a1float);
+						min = val;
 						if (temp != NULL)
 						{
 							*temp = i + g_OptionBase;
 						}
 					}
-					a1float++;
 				}
 			}
 			else
 			{
 				for (i = 0; i < card1; i++)
 				{
-					if (((MMFLOAT)(*a1int)) < min)
+					val = (MMFLOAT)STRIDE_INT(a1int, i, s1);
+					if (val < min)
 					{
-						min = (MMFLOAT)(*a1int);
+						min = val;
 						if (temp != NULL)
 						{
 							*temp = i + g_OptionBase;
 						}
 					}
-					a1int++;
 				}
 			}
 			targ = T_NBR;
@@ -3537,7 +3681,7 @@ void fun_math(void)
 			getcsargs(&tp, 1);
 			if (!(argc == 1))
 				StandardError(2);
-			numcols = parsefloatarray(argv[0], &a1float, 1, 0, dims, false);
+			numcols = parsefloatarray(argv[0], &a1float, 1, 0, dims, false, NULL);
 			for (i = 0; i < numcols; i++)
 			{
 				mag = mag + ((*a1float) * (*a1float));
@@ -3554,19 +3698,20 @@ void fun_math(void)
 			int i, card1 = 1;
 			MMFLOAT *a1float = NULL, mean = 0;
 			int64_t *a1int = NULL;
+			int s1;
 			getcsargs(&tp, 1);
 			if (!(argc == 1))
 				StandardError(2);
-			card1 = parsenumberarray(argv[0], &a1float, &a1int, 1, 0, dims, false);
+			card1 = parsenumberarray(argv[0], &a1float, &a1int, 1, 0, dims, false, &s1);
 			if (a1float != NULL)
 			{
 				for (i = 0; i < card1; i++)
-					mean += (*a1float++);
+					mean += STRIDE_FLOAT(a1float, i, s1);
 			}
 			else
 			{
 				for (i = 0; i < card1; i++)
-					mean += (MMFLOAT)(*a1int++);
+					mean += (MMFLOAT)STRIDE_INT(a1int, i, s1);
 			}
 			targ = T_NBR;
 			fret = mean / (MMFLOAT)card1;
@@ -3582,7 +3727,7 @@ void fun_math(void)
 			getcsargs(&tp, 1);
 			if (!(argc == 1))
 				StandardError(2);
-			card2 = parsenumberarray(argv[0], &a2float, &a2int, 1, 0, dims, false);
+			card2 = parsenumberarray(argv[0], &a2float, &a2int, 1, 0, dims, false, NULL);
 			card1 = card2;
 			card2 = (card2 - 1) / 2;
 			a1float = GetTempMainMemory(card1 * sizeof(MMFLOAT));
@@ -3628,7 +3773,7 @@ void fun_math(void)
 			getcsargs(&tp, 1);
 			if (!(argc == 1))
 				StandardError(2);
-			card1 = parsenumberarray(argv[0], &a1float, &a1int, 1, 0, dims, false);
+			card1 = parsenumberarray(argv[0], &a1float, &a1int, 1, 0, dims, false, NULL);
 			if (a1float != NULL)
 			{
 				a2float = a1float;
@@ -3669,19 +3814,20 @@ void fun_math(void)
 			int i, card1 = 1;
 			MMFLOAT *a1float = NULL, sum = 0;
 			int64_t *a1int = NULL;
+			int s1;
 			getcsargs(&tp, 1);
 			if (!(argc == 1))
 				StandardError(2);
-			card1 = parsenumberarray(argv[0], &a1float, &a1int, 1, 0, dims, false);
+			card1 = parsenumberarray(argv[0], &a1float, &a1int, 1, 0, dims, false, &s1);
 			if (a1float != NULL)
 			{
 				for (i = 0; i < card1; i++)
-					sum += (*a1float++);
+					sum += STRIDE_FLOAT(a1float, i, s1);
 			}
 			else
 			{
 				for (i = 0; i < card1; i++)
-					sum += (MMFLOAT)(*a1int++);
+					sum += (MMFLOAT)STRIDE_INT(a1int, i, s1);
 			}
 			targ = T_NBR;
 			fret = sum;
@@ -3846,8 +3992,8 @@ void cmd_FFT(unsigned char *pp)
 	if (tp)
 	{
 		getcsargs(&tp, 3);
-		card1 = parsefloatarray(argv[0], &a3float, 1, 1, dims, false);
-		card2 = parsefloatarray(argv[2], &a4float, 2, 1, dims, true);
+		card1 = parsefloatarray(argv[0], &a3float, 1, 1, dims, false, NULL);
+		card2 = parsefloatarray(argv[2], &a4float, 2, 1, dims, true, NULL);
 		if (card1 != card2)
 			StandardError(16);
 		for (i = 1; i < 65536; i *= 2)
@@ -3874,8 +4020,8 @@ void cmd_FFT(unsigned char *pp)
 	if (tp)
 	{
 		getcsargs(&tp, 3);
-		card1 = parsefloatarray(argv[0], &a3float, 1, 1, dims, false);
-		card2 = parsefloatarray(argv[2], &a4float, 2, 1, dims, true);
+		card1 = parsefloatarray(argv[0], &a3float, 1, 1, dims, false, NULL);
+		card2 = parsefloatarray(argv[2], &a4float, 2, 1, dims, true, NULL);
 		if (card1 != card2)
 			StandardError(16);
 		for (i = 1; i < 65536; i *= 2)
@@ -3902,10 +4048,10 @@ void cmd_FFT(unsigned char *pp)
 	if (tp)
 	{
 		getcsargs(&tp, 3);
-		card1 = parsefloatarray(argv[0], &a4float, 1, 2, dims, false);
+		card1 = parsefloatarray(argv[0], &a4float, 1, 2, dims, false, NULL);
 		int size = dims[1] - g_OptionBase + 1;
 		a1cplx = (cplx *)a4float;
-		card2 = parsefloatarray(argv[2], &a3float, 2, 1, dims, true);
+		card2 = parsefloatarray(argv[2], &a3float, 2, 1, dims, true, NULL);
 		if (card2 != size)
 			StandardError(16);
 		for (i = 1; i < 65536; i *= 2)
@@ -3928,8 +4074,8 @@ void cmd_FFT(unsigned char *pp)
 		return;
 	}
 	getcsargs(&pp, 3);
-	card1 = parsefloatarray(argv[0], &a3float, 1, 1, dims, false);
-	card2 = parsefloatarray(argv[2], &a4float, 2, 2, dims, true);
+	card1 = parsefloatarray(argv[0], &a3float, 1, 1, dims, false, NULL);
+	card2 = parsefloatarray(argv[2], &a4float, 2, 2, dims, true, NULL);
 	a2cplx = (cplx *)a4float;
 	if ((dims[1] - g_OptionBase + 1) != card1)
 		StandardError(16);

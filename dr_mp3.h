@@ -348,9 +348,12 @@ I am using "__inline__" only when we're compiling in strict ANSI mode.
         drmp3_uint32 sampleRate;
     } drmp3_config;
 
+    typedef struct drmp3dec_scratch drmp3dec_scratch;  /* Forward declaration */
+
     typedef struct
     {
         drmp3dec decoder;
+        drmp3dec_scratch *pScratch;      /* Dynamically allocated scratch buffer to reduce stack usage. */
         drmp3_uint32 channels;
         drmp3_uint32 sampleRate;
         drmp3_read_proc onRead;
@@ -773,7 +776,7 @@ typedef struct
     drmp3_uint8 preflag, scalefac_scale, count1_table, scfsi;
 } drmp3_L3_gr_info;
 
-typedef struct
+typedef struct drmp3dec_scratch
 {
     drmp3_bs bs;
     drmp3_uint8 maindata[DRMP3_MAX_BITRESERVOIR_BYTES + DRMP3_MAX_L3_FRAME_PAYLOAD_BYTES];
@@ -2368,12 +2371,12 @@ DRMP3_API void drmp3dec_init(drmp3dec *dec)
     dec->header[0] = 0;
 }
 
-DRMP3_API int drmp3dec_decode_frame(drmp3dec *dec, const drmp3_uint8 *mp3, int mp3_bytes, void *pcm, drmp3dec_frame_info *info)
+/* Internal decode function that uses a pre-allocated scratch buffer to reduce stack usage */
+static int drmp3dec_decode_frame_internal(drmp3dec *dec, const drmp3_uint8 *mp3, int mp3_bytes, void *pcm, drmp3dec_frame_info *info, drmp3dec_scratch *scratch)
 {
     int i = 0, igr, frame_size = 0, success = 1;
     const drmp3_uint8 *hdr;
     drmp3_bs bs_frame[1];
-    drmp3dec_scratch scratch;
 
     if (mp3_bytes > 4 && dec->header[0] == 0xff && drmp3_hdr_compare(dec->header, mp3))
     {
@@ -2410,23 +2413,23 @@ DRMP3_API int drmp3dec_decode_frame(drmp3dec *dec, const drmp3_uint8 *mp3, int m
 
     if (info->layer == 3)
     {
-        int main_data_begin = drmp3_L3_read_side_info(bs_frame, scratch.gr_info, hdr);
+        int main_data_begin = drmp3_L3_read_side_info(bs_frame, scratch->gr_info, hdr);
         if (main_data_begin < 0 || bs_frame->pos > bs_frame->limit)
         {
             drmp3dec_init(dec);
             return 0;
         }
-        success = drmp3_L3_restore_reservoir(dec, bs_frame, &scratch, main_data_begin);
+        success = drmp3_L3_restore_reservoir(dec, bs_frame, scratch, main_data_begin);
         if (success && pcm != NULL)
         {
             for (igr = 0; igr < (DRMP3_HDR_TEST_MPEG1(hdr) ? 2 : 1); igr++, pcm = DRMP3_OFFSET_PTR(pcm, sizeof(drmp3d_sample_t) * 576 * info->channels))
             {
-                DRMP3_ZERO_MEMORY(scratch.grbuf[0], 576 * 2 * sizeof(float));
-                drmp3_L3_decode(dec, &scratch, scratch.gr_info + igr * info->channels, info->channels);
-                drmp3d_synth_granule(dec->qmf_state, scratch.grbuf[0], 18, info->channels, (drmp3d_sample_t *)pcm, scratch.syn[0]);
+                DRMP3_ZERO_MEMORY(scratch->grbuf[0], 576 * 2 * sizeof(float));
+                drmp3_L3_decode(dec, scratch, scratch->gr_info + igr * info->channels, info->channels);
+                drmp3d_synth_granule(dec->qmf_state, scratch->grbuf[0], 18, info->channels, (drmp3d_sample_t *)pcm, scratch->syn[0]);
             }
         }
-        drmp3_L3_save_reservoir(dec, &scratch);
+        drmp3_L3_save_reservoir(dec, scratch);
     }
     else
     {
@@ -2442,15 +2445,15 @@ DRMP3_API int drmp3dec_decode_frame(drmp3dec *dec, const drmp3_uint8 *mp3, int m
 
         drmp3_L12_read_scale_info(hdr, bs_frame, sci);
 
-        DRMP3_ZERO_MEMORY(scratch.grbuf[0], 576 * 2 * sizeof(float));
+        DRMP3_ZERO_MEMORY(scratch->grbuf[0], 576 * 2 * sizeof(float));
         for (i = 0, igr = 0; igr < 3; igr++)
         {
-            if (12 == (i += drmp3_L12_dequantize_granule(scratch.grbuf[0] + i, bs_frame, sci, info->layer | 1)))
+            if (12 == (i += drmp3_L12_dequantize_granule(scratch->grbuf[0] + i, bs_frame, sci, info->layer | 1)))
             {
                 i = 0;
-                drmp3_L12_apply_scf_384(sci, sci->scf + igr, scratch.grbuf[0]);
-                drmp3d_synth_granule(dec->qmf_state, scratch.grbuf[0], 12, info->channels, (drmp3d_sample_t *)pcm, scratch.syn[0]);
-                DRMP3_ZERO_MEMORY(scratch.grbuf[0], 576 * 2 * sizeof(float));
+                drmp3_L12_apply_scf_384(sci, sci->scf + igr, scratch->grbuf[0]);
+                drmp3d_synth_granule(dec->qmf_state, scratch->grbuf[0], 12, info->channels, (drmp3d_sample_t *)pcm, scratch->syn[0]);
+                DRMP3_ZERO_MEMORY(scratch->grbuf[0], 576 * 2 * sizeof(float));
                 pcm = DRMP3_OFFSET_PTR(pcm, sizeof(drmp3d_sample_t) * 384 * info->channels);
             }
             if (bs_frame->pos > bs_frame->limit)
@@ -2463,6 +2466,13 @@ DRMP3_API int drmp3dec_decode_frame(drmp3dec *dec, const drmp3_uint8 *mp3, int m
     }
 
     return success * drmp3_hdr_frame_samples(dec->header);
+}
+
+/* Public API - allocates scratch on stack for backward compatibility */
+DRMP3_API int drmp3dec_decode_frame(drmp3dec *dec, const drmp3_uint8 *mp3, int mp3_bytes, void *pcm, drmp3dec_frame_info *info)
+{
+    drmp3dec_scratch scratch;
+    return drmp3dec_decode_frame_internal(dec, mp3, mp3_bytes, pcm, info, &scratch);
 }
 
 DRMP3_API void drmp3dec_f32_to_s16(const float *in, drmp3_int16 *out, size_t num_samples)
@@ -2838,7 +2848,15 @@ static drmp3_uint32 drmp3_decode_next_frame_ex__callbacks(drmp3 *pMP3, drmp3d_sa
             return 0;
         }
 
-        pcmFramesRead = drmp3dec_decode_frame(&pMP3->decoder, pMP3->pData + pMP3->dataConsumed, (int)pMP3->dataSize, pPCMFrames, &info); /* <-- Safe size_t -> int conversion thanks to the check above. */
+        /* Use pre-allocated scratch buffer if available, otherwise fall back to stack-based version */
+        if (pMP3->pScratch != NULL)
+        {
+            pcmFramesRead = drmp3dec_decode_frame_internal(&pMP3->decoder, pMP3->pData + pMP3->dataConsumed, (int)pMP3->dataSize, pPCMFrames, &info, pMP3->pScratch);
+        }
+        else
+        {
+            pcmFramesRead = drmp3dec_decode_frame(&pMP3->decoder, pMP3->pData + pMP3->dataConsumed, (int)pMP3->dataSize, pPCMFrames, &info);
+        }
 
         /* Consume the data. */
         if (info.frame_bytes > 0)
@@ -2914,7 +2932,15 @@ static drmp3_uint32 drmp3_decode_next_frame_ex__memory(drmp3 *pMP3, drmp3d_sampl
 
     for (;;)
     {
-        pcmFramesRead = drmp3dec_decode_frame(&pMP3->decoder, pMP3->memory.pData + pMP3->memory.currentReadPos, (int)(pMP3->memory.dataSize - pMP3->memory.currentReadPos), pPCMFrames, &info);
+        /* Use pre-allocated scratch buffer if available, otherwise fall back to stack-based version */
+        if (pMP3->pScratch != NULL)
+        {
+            pcmFramesRead = drmp3dec_decode_frame_internal(&pMP3->decoder, pMP3->memory.pData + pMP3->memory.currentReadPos, (int)(pMP3->memory.dataSize - pMP3->memory.currentReadPos), pPCMFrames, &info, pMP3->pScratch);
+        }
+        else
+        {
+            pcmFramesRead = drmp3dec_decode_frame(&pMP3->decoder, pMP3->memory.pData + pMP3->memory.currentReadPos, (int)(pMP3->memory.dataSize - pMP3->memory.currentReadPos), pPCMFrames, &info);
+        }
         if (pcmFramesRead > 0)
         {
             pcmFramesRead = drmp3_hdr_frame_samples(pMP3->decoder.header);
@@ -2989,6 +3015,13 @@ static drmp3_bool32 drmp3_init_internal(drmp3 *pMP3, drmp3_read_proc onRead, drm
     /* This function assumes the output object has already been reset to 0. Do not do that here, otherwise things will break. */
     drmp3dec_init(&pMP3->decoder);
 
+    /* Allocate scratch buffer to reduce stack usage during decoding */
+    pMP3->pScratch = (drmp3dec_scratch *)GetMemory(sizeof(drmp3dec_scratch));
+    if (pMP3->pScratch == NULL)
+    {
+        return DRMP3_FALSE; /* Out of memory. */
+    }
+
     pMP3->onRead = onRead;
     pMP3->onSeek = onSeek;
     pMP3->pUserData = pUserData;
@@ -2996,6 +3029,7 @@ static drmp3_bool32 drmp3_init_internal(drmp3 *pMP3, drmp3_read_proc onRead, drm
 
     if (pMP3->allocationCallbacks.onFree == NULL || (pMP3->allocationCallbacks.onMalloc == NULL && pMP3->allocationCallbacks.onRealloc == NULL))
     {
+        FreeMemorySafe((void **)&pMP3->pScratch);
         return DRMP3_FALSE; /* Invalid allocation callbacks. */
     }
 
@@ -3003,6 +3037,7 @@ static drmp3_bool32 drmp3_init_internal(drmp3 *pMP3, drmp3_read_proc onRead, drm
     if (drmp3_decode_next_frame(pMP3) == 0)
     {
         drmp3__free_from_callbacks(pMP3->pData, &pMP3->allocationCallbacks); /* The call above may have allocated memory. Need to make sure it's freed before aborting. */
+        FreeMemorySafe((void **)&pMP3->pScratch);
         return DRMP3_FALSE;                                                  /* Not a valid MP3 stream. */
     }
 
@@ -3894,6 +3929,7 @@ DRMP3_API void drmp3_uninit(drmp3 *pMP3)
 #endif
 
     drmp3__free_from_callbacks(pMP3->pData, &pMP3->allocationCallbacks);
+    FreeMemorySafe((void **)&pMP3->pScratch);
 }
 
 #if defined(DR_MP3_FLOAT_OUTPUT)

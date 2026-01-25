@@ -633,10 +633,17 @@ BMP_Result decodeBMP(bool topdown)
                 cleanupAndError("Failed to read info header", &palette, &rowBuffer, &lineData, &lineTable);
         }
 
-        // Validate header
-        if (infoHeader.biSize != 40)
+        // Validate header - accept BITMAPINFOHEADER (40), BITMAPV4HEADER (108), and BITMAPV5HEADER (124)
+        if (infoHeader.biSize != 40 && infoHeader.biSize != 108 && infoHeader.biSize != 124)
         {
                 cleanupAndError("Unsupported BMP header format", &palette, &rowBuffer, &lineData, &lineTable);
+        }
+
+        // Skip any extra header bytes for V4/V5 headers (we already read 40 bytes)
+        if (infoHeader.biSize > 40)
+        {
+                int extraBytes = infoHeader.biSize - 40;
+                onBMPSeek(extraBytes, SEEK_CUR);
         }
 
         // Check compression and bit depth combinations

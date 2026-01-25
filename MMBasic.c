@@ -37,6 +37,7 @@ OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
 #include "Operators.h"
 #include "Custom.h"
 #include "Hardware_Includes.h"
+#include "Turtle.h"
 #include "hardware/flash.h"
 #ifndef PICOMITEWEB
 #include "pico/multicore.h"
@@ -84,7 +85,7 @@ __not_in_flash("data") const unsigned char name_start_tbl[256] = {
     ['A' ... 'Z'] = 1, ['a' ... 'z'] = 1, ['_'] = 1};
 
 __not_in_flash("data") const unsigned char name_char_tbl[256] = {
-    ['A' ... 'Z'] = 1, ['a' ... 'z'] = 1, ['0' ... '9'] = 1, ['_'] = 1, ['.'] = 1};
+    ['A' ... 'Z'] = 1, ['a' ... 'z'] = 1, ['0' ... '9'] = 1, ['_'] = 1, ['.'] = 1, [0x1e] = 1};
 
 __not_in_flash("data") const unsigned char name_end_tbl[256] = {
     ['A' ... 'Z'] = 1, ['a' ... 'z'] = 1, ['0' ... '9'] = 1, ['_'] = 1, ['.'] = 1, ['$'] = 1, ['!'] = 1, ['%'] = 1};
@@ -107,6 +108,16 @@ __not_in_flash("data") const unsigned char charmap[256] = {
     0xe0, 0xe1, 0xe2, 0xe3, 0xe4, 0xe5, 0xe6, 0xe7, 0xe8, 0xe9, 0xea, 0xeb, 0xec, 0xed, 0xee, 0xef,
     0xf0, 0xf1, 0xf2, 0xf3, 0xf4, 0xf5, 0xf6, 0xf7, 0xf8, 0xf9, 0xfa, 0xfb, 0xfc, 0xfd, 0xfe, 0xff};
 #endif
+
+// Forward declarations for struct helper functions (NOT in RAM for size savings)
+#ifdef STRUCTENABLED
+int ValidateStructParam(int varIndex, int argVarIndex, void *argval_s, int argtype, unsigned char *argname);
+unsigned char *CopyStructReturn(void *struct_data, int struct_type_idx, int *out_struct_type);
+void *ResolveStructMember(unsigned char *struct_ptr, int struct_idx, unsigned char *member_path,
+                          unsigned char **pp, int *member_type);
+int FindStructBase(unsigned char *basename, int baselen, int *pvindex);
+#endif
+
 struct s_vartbl __attribute__((aligned(64))) g_vartbl[MAXVARS] = {0}; // this table stores all variables
 int g_varcnt = 0;                                                     // number of variables
 int g_VarIndex;                                                       // Global set by findvar after a variable has been created or found
@@ -140,6 +151,141 @@ int NextData;                // used to track the next item to read in DATA & RE
 unsigned char *NextDataLine; // used to track the next line to read in DATA & READ stmts
 int g_OptionBase;            // track the state of OPTION BASE
 int PrepareProgramExt(unsigned char *, int, unsigned char **, int);
+char PreprogramErrMsg[MAXERRMSG];        // Error message from PrepareProgram if it fails
+unsigned char *PreprogramErrLine = NULL; // Line pointer where PrepareProgram error occurred
+
+// Helper function to find the T_NEWLINE that starts a line containing the given pointer
+// Returns the original pointer if it already points to T_NEWLINE or if not found
+static unsigned char *FindLineStart(unsigned char *linePtr, unsigned char *memStart)
+{
+    char *p, *tp;
+
+    if (!linePtr || *linePtr == T_NEWLINE)
+        return linePtr;
+
+    // Search for the start of the line (similar to error() function logic)
+    tp = p = (char *)memStart;
+    while (*p != 0xff)
+    {
+        while (*p)
+            p++; // look for the zero marking the start of an element
+        if (p >= (char *)linePtr || p[1] == 0)
+        { // the previous line was the one that we wanted
+            return (unsigned char *)tp;
+        }
+        if (p[1] == T_NEWLINE)
+        {
+            tp = ++p; // save because it might be the line we want
+        }
+        p++; // step over the zero marking the start of the element
+        skipspace(p);
+        if (p[0] == T_LABEL)
+            p += p[1] + 2; // skip over the label
+    }
+    return linePtr; // fallback to original
+}
+
+// Helper function to set error info for PrepareProgram errors
+// This mimics what error() does for setting editor position but without longjmp
+static void SetPreprogramError(const char *msg, unsigned char *linePtr)
+{
+    strcpy(PreprogramErrMsg, msg);
+    PreprogramErrLine = linePtr;
+
+    // Set editor position if the line is in program memory
+    if (linePtr && linePtr >= ProgMemory && linePtr < ProgMemory + MAX_PROG_SIZE)
+    {
+        // Find the T_NEWLINE that starts this line (editor needs this)
+        StartEditPoint = FindLineStart(linePtr, ProgMemory);
+        StartEditChar = 0;
+    }
+    else if (linePtr && Option.LIBRARY_FLASH_SIZE == MAX_PROG_SIZE &&
+             linePtr >= LibMemory && linePtr < LibMemory + MAX_PROG_SIZE)
+    {
+        // In library - can't edit, but still set for display purposes
+        StartEditPoint = NULL;
+        StartEditChar = 0;
+    }
+    else
+    {
+        StartEditPoint = NULL;
+        StartEditChar = 0;
+    }
+}
+
+// Print PrepareProgram error with line info (similar to error() output)
+// This displays the line number, source line, and error message
+void PrintPreprogramError(void)
+{
+    char tstr[STRINGSIZE * 2];
+    unsigned char linebuf[STRINGSIZE];
+    int line_num;
+    char *p, *tp;
+    unsigned char *linePtr = PreprogramErrLine;
+
+    if (linePtr)
+    {
+        // Determine if we're in program memory or library
+        unsigned char *memStart = ProgMemory;
+        unsigned char *memEnd = ProgMemory + MAX_PROG_SIZE;
+        int isLibrary = 0;
+
+        if (Option.LIBRARY_FLASH_SIZE == MAX_PROG_SIZE &&
+            linePtr >= LibMemory && linePtr < LibMemory + MAX_PROG_SIZE)
+        {
+            memStart = LibMemory;
+            memEnd = LibMemory + MAX_PROG_SIZE;
+            isLibrary = 1;
+        }
+
+        if (linePtr >= memStart && linePtr < memEnd)
+        {
+            // Handle case where linePtr doesn't point to T_NEWLINE
+            // (similar to error() function logic)
+            if (*linePtr != T_NEWLINE)
+            {
+                // Search for the start of the line
+                tp = p = (char *)memStart;
+                while (*p != 0xff)
+                {
+                    while (*p)
+                        p++; // look for the zero marking the start of an element
+                    if (p >= (char *)linePtr || p[1] == 0)
+                    { // the previous line was the one that we wanted
+                        linePtr = (unsigned char *)tp;
+                        break;
+                    }
+                    if (p[1] == T_NEWLINE)
+                    {
+                        tp = ++p; // save because it might be the line we want
+                    }
+                    p++; // step over the zero marking the start of the element
+                    skipspace(p);
+                    if (p[0] == T_LABEL)
+                        p += p[1] + 2; // skip over the label
+                }
+            }
+
+            // Get the line number and source text
+            llist(linebuf, linePtr);
+            if (isLibrary)
+            {
+                sprintf(tstr, "[LIBRARY] %s\r\n", linebuf);
+            }
+            else
+            {
+                line_num = CountLines(linePtr);
+                sprintf(tstr, "[%d] %s\r\n", line_num, linebuf);
+            }
+            MMPrintString(tstr);
+        }
+    }
+
+    // Print the error message
+    sprintf(tstr, "Error: %s\r\n", PreprogramErrMsg);
+    MMPrintString(tstr);
+}
+int ProgramValid = 1; // 0 = program has errors (cannot run), 1 = valid/runnable
 extern uint32_t core1stack[];
 ;
 
@@ -170,10 +316,10 @@ char digit[256] = {
 ///////////////////////////////////////////////////////////////////////////////////////////////
 // Global information used by operators and functions
 //
-int targ;                            // the type of the returned value
 MMFLOAT farg1, farg2, fret;          // the two float arguments and returned value
 long long int iarg1, iarg2, iret;    // the two integer arguments and returned value
 unsigned char *sarg1, *sarg2, *sret; // the two string arguments and returned value
+int targ;                            // the type of the returned value
 
 ////////////////////////////////////////////////////////////////////////////////////////////////
 // Global information used by functions
@@ -204,7 +350,41 @@ unsigned char *getvalue(unsigned char *p, MMFLOAT *fa, long long int *ia, unsign
 unsigned char tokenTHEN, tokenELSE, tokenGOTO, tokenEQUAL, tokenTO, tokenSTEP, tokenWHILE, tokenUNTIL, tokenGOSUB, tokenAS, tokenFOR;
 unsigned short cmdIF, cmdENDIF, cmdEND_IF, cmdELSEIF, cmdELSE_IF, cmdELSE, cmdSELECT_CASE, cmdFOR, cmdNEXT, cmdWHILE, cmdENDSUB, cmdENDFUNCTION, cmdLOCAL, cmdSTATIC, cmdCASE, cmdDO, cmdLOOP, cmdCASE_ELSE, cmdEND_SELECT;
 unsigned short cmdSUB, cmdFUN, cmdCFUN, cmdCSUB, cmdIRET, cmdComment, cmdEndComment;
+#ifdef STRUCTENABLED
+unsigned short cmdTYPE, cmdEND_TYPE; // Structure type definition commands
+#endif
 uint32_t heapend;
+
+#ifdef STRUCTENABLED
+// Calculate the natural alignment needed for a structure (used to pad arrays of structs)
+static int GetStructAlignment(struct s_structdef *sd)
+{
+    int max_align = 1;
+
+    for (int i = 0; i < sd->num_members; i++)
+    {
+        struct s_structmember *sm = &sd->members[i];
+        int align = 1;
+
+        if (sm->type == T_INT || sm->type == T_NBR)
+        {
+            align = sizeof(long long int);
+        }
+        else if (sm->type == T_STRUCT)
+        {
+            if (sm->size >= 0 && sm->size < g_structcnt && g_structtbl[sm->size] != NULL)
+                align = GetStructAlignment(g_structtbl[sm->size]);
+            else
+                align = sizeof(long long int); // Safe default for unknown nested struct
+        }
+
+        if (align > max_align)
+            max_align = align;
+    }
+
+    return max_align;
+}
+#endif
 /********************************************************************************************************************************************
  Program management
  Includes the routines to initialise MMBasic, start running the interpreter, and to run a program in memory
@@ -216,6 +396,15 @@ void MIPS16 InitBasic(void)
     DefaultType = T_NBR;
     CommandTableSize = (sizeof(commandtbl) / sizeof(struct s_tokentbl));
     TokenTableSize = (sizeof(tokentbl) / sizeof(struct s_tokentbl));
+
+#ifdef STRUCTENABLED
+    // Initialize structure type table pointers to NULL
+    for (int i = 0; i < MAX_STRUCT_TYPES; i++)
+    {
+        g_structtbl[i] = NULL;
+    }
+    g_structcnt = 0;
+#endif
 
     ClearProgram(true);
 
@@ -256,6 +445,10 @@ void MIPS16 InitBasic(void)
     cmdCSUB = GetCommandValue((unsigned char *)"CSub");
     cmdComment = GetCommandValue((unsigned char *)"/*");
     cmdEndComment = GetCommandValue((unsigned char *)"*/");
+#ifdef STRUCTENABLED
+    cmdTYPE = GetCommandValue((unsigned char *)"Type");
+    cmdEND_TYPE = GetCommandValue((unsigned char *)"End Type");
+#endif
     heapend = (uint32_t)&__heap_start + PICO_HEAP_SIZE;
     //  SInt(CommandTableSize);
     //  SIntComma(TokenTableSize);
@@ -355,13 +548,15 @@ void __not_in_flash_func(ExecuteProgram)(unsigned char *p)
                             StandardError(36);
                         else if (!isnamestart(*p))
                             error("Invalid character: @", (int)(*p));
-                        i = FindSubFun(p, false); // it could be a defined command
-                        if (i >= 0)
-                        { // >= 0 means it is a user defined command
-                            DefinedSubFun(false, p, i, NULL, NULL, NULL, NULL);
+                        {
+                            i = FindSubFun(p, false); // it could be a defined command
+                            if (i >= 0)
+                            { // >= 0 means it is a user defined command
+                                DefinedSubFun(false, p, i, NULL, NULL, NULL, NULL);
+                            }
+                            else
+                                StandardError(36);
                         }
-                        else
-                            StandardError(36);
                     }
                 }
                 else
@@ -398,7 +593,8 @@ void __not_in_flash_func(ExecuteProgram)(unsigned char *p)
 // Scan through the program loaded in flash and build a table pointing to the definition of all user defined subroutines and functions.
 // This pre processing speeds up the program when using defined subroutines and functions
 // this routine also looks for embedded fonts and adds them to the font table
-void MIPS16 PrepareProgram(int ErrAbort)
+// Returns: 0 = success, 1 = error (error message in PreprogramErrMsg)
+int MIPS16 PrepareProgram(int ErrAbort)
 {
     int i, j, NbrFuncts;
 #ifdef rp2350
@@ -407,14 +603,49 @@ void MIPS16 PrepareProgram(int ErrAbort)
     char printvar[MAXVARLEN + 1];
 #endif
     unsigned char *p1, *p2;
+
+    // Clear any previous error state
+    PreprogramErrMsg[0] = 0;
+    PreprogramErrLine = NULL;
+    ProgramValid = 1;
+
     for (i = FONT_BUILTIN_NBR; i < FONT_TABLE_SIZE - 1; i++)
         FontTable[i] = NULL; // clear the font table
+
+#ifdef STRUCTENABLED
+    // Clear structure type definitions before parsing
+    // IMPORTANT: When called from command prompt (not after ClearProgram/InitHeap),
+    // memory may have been previously allocated but not freed. We must free it
+    // to prevent memory leaks from repeated command line entries.
+    for (i = 0; i < MAX_STRUCT_TYPES; i++)
+    {
+        if (g_structtbl[i] != NULL)
+        {
+            // Validate pointer is within valid heap memory before freeing
+            // FreeMemorySafe checks both MMHeap and PSRAM ranges
+            FreeMemorySafe((void **)&g_structtbl[i]);
+        }
+    }
+    g_structcnt = 0;
+#endif
 
     NbrFuncts = 0;
     CFunctionFlash = CFunctionLibrary = NULL;
     if (Option.LIBRARY_FLASH_SIZE == MAX_PROG_SIZE)
+    {
         NbrFuncts = PrepareProgramExt(LibMemory, 0, &CFunctionLibrary, ErrAbort);
-    PrepareProgramExt(ProgMemory, NbrFuncts, &CFunctionFlash, ErrAbort);
+        if (NbrFuncts < 0)
+        {
+            ProgramValid = 0;
+            return 1; // Error occurred
+        }
+    }
+    NbrFuncts = PrepareProgramExt(ProgMemory, NbrFuncts, &CFunctionFlash, ErrAbort);
+    if (NbrFuncts < 0)
+    {
+        ProgramValid = 0;
+        return 1; // Error occurred
+    }
 
     // check the sub/fun table for duplicates
 #ifdef rp2350
@@ -440,7 +671,11 @@ void MIPS16 PrepareProgram(int ErrAbort)
             if (++namelen > MAXVARLEN)
             {
                 if (ErrAbort)
-                    error("Function name too long");
+                {
+                    SetPreprogramError("Function name too long", CurrentLinePtr);
+                    ProgramValid = 0;
+                    return 1;
+                }
             }
 
         } while (isnamechar(*p1));
@@ -466,13 +701,13 @@ void MIPS16 PrepareProgram(int ErrAbort)
 
 #endif
     if (!ErrAbort)
-        return;
+        return 0;
 
     for (i = 0; i < MAXSUBFUN && subfun[i] != NULL; i++)
     {
         for (j = i + 1; j < MAXSUBFUN && subfun[j] != NULL; j++)
         {
-            CurrentLinePtr = p1 = subfun[i];
+            p1 = subfun[i];
             p1 += sizeof(CommandToken);
             skipspace(p1);
             p2 = subfun[j];
@@ -483,8 +718,13 @@ void MIPS16 PrepareProgram(int ErrAbort)
                 if (!isnamechar(*p1) && !isnamechar(*p2))
                 {
                     if (ErrAbort)
-                        error("Duplicate name");
-                    return;
+                    {
+                        // Point to the duplicate (second) function, not the original
+                        SetPreprogramError("Duplicate name", subfun[j]);
+                        ProgramValid = 0;
+                        return 1;
+                    }
+                    return 0;
                 }
                 if (mytoupper(*p1) != mytoupper(*p2))
                     break;
@@ -498,10 +738,12 @@ void MIPS16 PrepareProgram(int ErrAbort)
     //    		MMPrintString(funtbl[i].name);PIntHC(funtbl[i].index);PIntComma(i);PRet();
     //    	}
     //    }
+    return 0;
 }
 
 // This scans one area (main program or the library area) for user defined subroutines and functions.
 // It is only used by PrepareProgram() above.
+// Returns: count of subfuns on success, -1 on error (error message set in PreprogramErrMsg)
 int MIPS16 PrepareProgramExt(unsigned char *p, int i, unsigned char **CFunPtr, int ErrAbort)
 {
     unsigned int *cfp;
@@ -515,23 +757,12 @@ int MIPS16 PrepareProgramExt(unsigned char *p, int i, unsigned char **CFunPtr, i
         { // found a SUB, FUN, CFUNCTION or CSUB token
             if (i >= MAXSUBFUN)
             {
-                FlashWriteInit(PROGRAM_FLASH);
-                flash_range_erase(realflashpointer, MAX_PROG_SIZE);
-                int j = MAX_PROG_SIZE / 4;
-                int *pp = (int *)(flash_progmemory);
-                while (j--)
-                    if (*pp++ != 0xFFFFFFFF)
-                    {
-                        enable_interrupts_pico();
-                        error("Flash erase problem");
-                    }
-                enable_interrupts_pico();
-                MMPrintString("Error: Too many subroutines and functions - erasing program\r\n");
-                uSec(100000);
-                ClearProgram(true);
-                cmdline = NULL;
-                do_end(false);
-                longjmp(mark, 1); // jump back to the input prompt
+                if (ErrAbort)
+                {
+                    SetPreprogramError("Too many subroutines and functions", CurrentLinePtr);
+                    return -1;
+                }
+                continue;
             }
             subfun[i++] = p++; // save the address and step over the token
             p++;               // step past rest of command token
@@ -539,11 +770,222 @@ int MIPS16 PrepareProgramExt(unsigned char *p, int i, unsigned char **CFunPtr, i
             if (!isnamestart(*p))
             {
                 if (ErrAbort)
-                    error("Invalid identifier");
+                {
+                    SetPreprogramError("Invalid identifier", CurrentLinePtr);
+                    return -1;
+                }
                 i--;
                 continue;
             }
         }
+#ifdef STRUCTENABLED
+        // Process TYPE definitions during preprocessing
+        else if (tkn == cmdTYPE)
+        {
+            unsigned char *tp = p;
+            unsigned char name[MAXVARLEN + 1];
+            int namelen = 0;
+            int j;
+            struct s_structdef *sd;
+
+            // Skip past TYPE token
+            tp += sizeof(CommandToken);
+            skipspace(tp);
+
+            // Parse structure type name
+            if (!isnamestart(*tp))
+            {
+                if (ErrAbort)
+                {
+                    SetPreprogramError("Invalid TYPE name", CurrentLinePtr);
+                    return -1;
+                }
+                continue;
+            }
+
+            while (isnamechar(*tp) && namelen < MAXVARLEN)
+            {
+                name[namelen++] = mytoupper(*tp++);
+            }
+            name[namelen] = 0;
+
+            // Check for duplicate type name
+            for (j = 0; j < g_structcnt; j++)
+            {
+                if (g_structtbl[j] != NULL && strcmp((char *)name, (char *)g_structtbl[j]->name) == 0)
+                {
+                    if (ErrAbort)
+                    {
+                        SetPreprogramError("TYPE already defined", CurrentLinePtr);
+                        return -1;
+                    }
+                    continue;
+                }
+            }
+
+            // Check max types
+            if (g_structcnt >= MAX_STRUCT_TYPES)
+            {
+                if (ErrAbort)
+                {
+                    SetPreprogramError("Too many structure types", CurrentLinePtr);
+                    return -1;
+                }
+                continue;
+            }
+
+            // Belt and braces: free any existing allocation at this index
+            // This should not normally happen as PrepareProgram clears the table,
+            // but provides extra safety against memory leaks in edge cases
+            if (g_structtbl[g_structcnt] != NULL)
+            {
+                FreeMemorySafe((void **)&g_structtbl[g_structcnt]);
+            }
+
+            // Allocate memory for this structure type definition
+            g_structtbl[g_structcnt] = (struct s_structdef *)GetMemory(sizeof(struct s_structdef));
+            sd = g_structtbl[g_structcnt];
+            memset(sd, 0, sizeof(struct s_structdef));
+            memcpy(sd->name, name, namelen + 1);
+            sd->num_members = 0;
+            sd->total_size = 0;
+
+            // Now scan for members until END TYPE
+            // We must manually scan lines since member definitions don't start with command tokens
+            while (*p)
+                p++; // skip to end of TYPE line (the zero byte)
+            p++;     // step over the zero
+
+            while (1)
+            {
+                unsigned char c;
+
+                // Skip to start of next meaningful content
+                c = *p;
+                if (c == 0)
+                {
+                    if (ErrAbort)
+                    {
+                        SetPreprogramError("No matching END TYPE", CurrentLinePtr);
+                        return -1;
+                    }
+                    break;
+                }
+
+                if (c == T_NEWLINE)
+                {
+                    CurrentLinePtr = p;
+                    p++;
+                    c = *p;
+                }
+
+                if (c == T_LINENBR)
+                {
+                    p += 3;
+                    c = *p;
+                }
+
+                skipspace(p);
+                c = *p;
+
+                // Skip full-line comments inside TYPE/END TYPE
+                if (c == '\'')
+                {
+                    while (*p)
+                        p++; // move to end of the line
+                    p++;     // step over the zero terminator
+                    continue;
+                }
+                if (p[0] >= C_BASETOKEN && p[1] >= C_BASETOKEN)
+                {
+                    CommandToken commenttkn = commandtbl_decode(p);
+                    if (commenttkn == GetCommandValue((unsigned char *)"Rem"))
+                    {
+                        while (*p)
+                            p++; // move to end of the line
+                        p++;     // step over the zero terminator
+                        continue;
+                    }
+                }
+
+                if (c == T_LABEL)
+                {
+                    p += p[1] + 2;
+                    skipspace(p);
+                    c = *p;
+                }
+
+                // Check if this is a command token (both bytes >= C_BASETOKEN)
+                if (p[0] >= C_BASETOKEN && p[1] >= C_BASETOKEN)
+                {
+                    CommandToken membertkn = commandtbl_decode(p);
+
+                    if (membertkn == cmdTYPE)
+                    {
+                        if (ErrAbort)
+                        {
+                            SetPreprogramError("Nested TYPE not allowed", CurrentLinePtr);
+                            return -1;
+                        }
+                        break;
+                    }
+
+                    if (membertkn == cmdEND_TYPE)
+                    {
+                        // Validate structure has members
+                        if (sd->num_members == 0)
+                        {
+                            if (ErrAbort)
+                            {
+                                SetPreprogramError("TYPE has no members", CurrentLinePtr);
+                                return -1;
+                            }
+                        }
+                        else
+                        {
+#ifdef STRUCTENABLED
+                            // Pad the total size to the structure's natural alignment so array elements stay aligned
+                            int align = GetStructAlignment(sd);
+                            if (align > 1 && (sd->total_size % align) != 0)
+                                sd->total_size = ((sd->total_size + align - 1) / align) * align;
+#endif
+                            g_structcnt++; // Finalize the structure
+                        }
+                        // Skip to end of END TYPE line
+                        while (*p)
+                            p++;
+                        break;
+                    }
+
+                    // Some other command inside TYPE block - not allowed
+                    if (ErrAbort)
+                    {
+                        SetPreprogramError("Invalid statement inside TYPE block", CurrentLinePtr);
+                        return -1;
+                    }
+                    break;
+                }
+
+                // Not a command - should be a member definition
+                // Parse the member definition
+                const char *memberErr = ParseStructMember(p, sd);
+                if (memberErr)
+                {
+                    if (ErrAbort)
+                    {
+                        SetPreprogramError(memberErr, CurrentLinePtr);
+                        return -1;
+                    }
+                    break;
+                }
+
+                // Skip to end of this line
+                while (*p)
+                    p++;
+                p++; // step over the zero
+            }
+        }
+#endif
         while (*p)
             p++; // look for the zero marking the start of the next element
     }
@@ -750,6 +1192,9 @@ void MIPS16 __not_in_flash_func(DefinedSubFun)(int isfun, unsigned char *cmd, in
     // if this is a function we check to find if the function's type has been specified with AS <type> and save it
     CurrentLinePtr = SubLinePtr; // report errors at the definition
     FunType = T_NOTYPE;
+#ifdef STRUCTENABLED
+    int SavedStructArg = -1; // Save struct index for function return type
+#endif
     if (isfun)
     {
         ttp = skipvar(ttp, false); // point to after the function name and bracketed arguments
@@ -760,6 +1205,9 @@ void MIPS16 __not_in_flash_func(DefinedSubFun)(int isfun, unsigned char *cmd, in
             ttp = CheckIfTypeSpecified(ttp, &FunType, true); // get the type
             if (!(FunType & T_IMPLIED))
                 error("Variable type");
+#ifdef STRUCTENABLED
+            SavedStructArg = g_StructArg; // Save before argument processing overwrites it
+#endif
         }
         FunType |= (V_FIND | V_DIM_VAR | V_LOCAL | V_EMPTY_OK);
     }
@@ -832,7 +1280,13 @@ void MIPS16 __not_in_flash_func(DefinedSubFun)(int isfun, unsigned char *cmd, in
                 {
                     // yes, this is a valid variable.  set argvalue to point to the variable's data and argtype to its type
                     argval[i].s = findvar(argv1[i], V_FIND | V_EMPTY_OK); // get a pointer to the variable's data
-                    argtype[i] = g_vartbl[g_VarIndex].type;               // and the variable's type
+#ifdef STRUCTENABLED
+                    // For struct member access, use the member's type instead of the struct's type
+                    if ((g_vartbl[g_VarIndex].type & T_STRUCT) && g_StructMemberType != 0)
+                        argtype[i] = g_StructMemberType;
+                    else
+#endif
+                        argtype[i] = g_vartbl[g_VarIndex].type; // and the variable's type
                     argVarIndex[i] = g_VarIndex;
                     if (argtype[i] & T_CONST)
                     {
@@ -944,10 +1398,27 @@ void MIPS16 __not_in_flash_func(DefinedSubFun)(int isfun, unsigned char *cmd, in
                 error("Expected an array");
             if (TypeMask(g_vartbl[g_VarIndex].type) != TypeMask(argtype[i]))
                 error("Incompatible type: $", argv1[i]);
-            g_vartbl[g_VarIndex].val.s = NULL;
-            for (j = 0; j < MAXDIM; j++) // copy the dimensions of the supplied variable into our local variable
+#ifdef STRUCTENABLED
+            // For struct arrays, verify the struct types match
+            if ((g_vartbl[g_VarIndex].type & T_STRUCT) && (argtype[i] & T_STRUCT))
+            {
+                if (g_vartbl[g_VarIndex].size != g_vartbl[argVarIndex[i]].size)
+                    error("Structure type mismatch: $", argv1[i]);
+            }
+#endif
+            g_vartbl[g_VarIndex].val.s = g_vartbl[argVarIndex[i]].val.s; // Point to caller's array data
+            g_vartbl[g_VarIndex].type |= T_PTR;                          // Mark as pointer so we don't free caller's memory
+            for (j = 0; j < MAXDIM; j++)                                 // copy the dimensions of the supplied variable into our local variable
                 g_vartbl[g_VarIndex].dims[j] = g_vartbl[argVarIndex[i]].dims[j];
+            g_vartbl[g_VarIndex].size = g_vartbl[argVarIndex[i]].size; // copy string length for string arrays
+            continue;                                                  // Skip the rest of parameter handling
         }
+
+#ifdef STRUCTENABLED
+        // if the definition called for a struct, use helper (NOT in RAM for size savings)
+        if (ValidateStructParam(g_VarIndex, argVarIndex[i], argval[i].s, argtype[i], argv1[i]))
+            continue; // Skip normal pointer/value handling below
+#endif
 
         // if this is a pointer check and the type is NOT the same as that requested in the sub/fun definition
         if ((argtype[i] & T_PTR) && TypeMask(g_vartbl[g_VarIndex].type) != TypeMask(argtype[i]))
@@ -956,15 +1427,9 @@ void MIPS16 __not_in_flash_func(DefinedSubFun)(int isfun, unsigned char *cmd, in
                 error("BYREF requires same types: $", argv1[i]);
             if ((TypeMask(g_vartbl[g_VarIndex].type) & T_STR) || (TypeMask(argtype[i]) & T_STR))
                 error("Incompatible type: $", argv1[i]);
-            // make this into an ordinary argument
-            if (g_vartbl[argVarIndex[i]].type & T_PTR)
-            {
-                argval[i].i = *g_vartbl[argVarIndex[i]].val.ia; // get the value if the supplied argument is a pointer
-            }
-            else
-            {
-                argval[i].i = *(long long int *)argval[i].s; // get the value if the supplied argument is an ordinary variable
-            }
+            // make this into an ordinary argument - use argval[i].s which already points to the correct data
+            // (for struct members, findvar resolved the member offset; for pointer variables, it's the target)
+            argval[i].i = *(long long int *)argval[i].s;
             argtype[i] &= ~T_PTR; // and remove the pointer flag
         }
 
@@ -1022,8 +1487,14 @@ void MIPS16 __not_in_flash_func(DefinedSubFun)(int isfun, unsigned char *cmd, in
     //   - When that returns we need to restore the global variables
     //   - Get the variable's value and save that in the return value globals (fret or sret)
     //   - Return to the expression parser
+#ifdef STRUCTENABLED
+    g_StructArg = SavedStructArg; // Restore struct index for function return type
+#endif
     tp = findvar(fun_name, FunType | V_FUNCT); // declare the local variable
     FunType = g_vartbl[g_VarIndex].type;
+#ifdef STRUCTENABLED
+    int FunStructType = -1; // struct type index if returning a struct
+#endif
     if (FunType & T_STR)
     {
         FreeMemorySafe((void **)&g_vartbl[g_VarIndex].val.s); // free the memory if it is a string
@@ -1032,6 +1503,14 @@ void MIPS16 __not_in_flash_func(DefinedSubFun)(int isfun, unsigned char *cmd, in
         g_vartbl[g_VarIndex].val.s = tp = GetTempStrMemory(); // and use our own memory
         g_LocalIndex++;
     }
+#ifdef STRUCTENABLED
+    else if (FunType & T_STRUCT)
+    {
+        // Function returns a struct - save info for later copy to temp memory
+        FunStructType = (int)g_vartbl[g_VarIndex].size;
+        // tp already points to the struct data from findvar
+    }
+#endif
     skipelement(p); // point to the body of the function
 
     ttp = nextstmt; // save the globals used by commands
@@ -1050,6 +1529,13 @@ void MIPS16 __not_in_flash_func(DefinedSubFun)(int isfun, unsigned char *cmd, in
         *fa = *(MMFLOAT *)tp;
     else if (FunType & T_INT)
         *i64a = *(long long int *)tp;
+#ifdef STRUCTENABLED
+    else if (FunType & T_STRUCT)
+    {
+        // Use helper to copy struct return (NOT in RAM for size savings)
+        *sa = CopyStructReturn(tp, FunStructType, &g_ExprStructType);
+    }
+#endif
     else
         *sa = tp;                    // for a string we just need to return the local memory
     *typ = FunType;                  // save the function type for the caller
@@ -1963,7 +2449,28 @@ unsigned char MIPS32 __not_in_flash_func (*getvalue)(unsigned char *p, MMFLOAT *
             else
             {
                 s = (unsigned char *)findvar(p, V_FIND);
+#ifdef STRUCTENABLED
+                // For struct member access, use the member type
+                if (g_StructMemberType != 0)
+                {
+                    t = TypeMask(g_StructMemberType);
+                    g_ExprStructType = -1; // Not a whole struct
+                }
+                else if (g_vartbl[g_VarIndex].type & T_STRUCT)
+                {
+                    // Whole struct variable - return struct type for assignment
+                    t = T_STRUCT;
+                    g_ExprStructType = (int)g_vartbl[g_VarIndex].size; // Store struct type index
+                    // s already points to struct data from findvar
+                }
+                else
+                {
+                    t = TypeMask(g_vartbl[g_VarIndex].type);
+                    g_ExprStructType = -1;
+                }
+#else
                 t = TypeMask(g_vartbl[g_VarIndex].type);
+#endif
                 if (t & T_NBR)
                     f = (*(MMFLOAT *)s);
                 if (t & T_INT)
@@ -2470,21 +2977,6 @@ unsigned char MIPS16 *findlabel(unsigned char *labelptr)
 }
 #endif
 
-// returns true if 'line' is a valid line in the program
-int IsValidLine(int nbr)
-{
-    unsigned char *p;
-    p = findline(nbr, false);
-    if (*p == T_NEWLINE)
-        p++;
-    if (*p == T_LINENBR)
-    {
-        if (((p[1] << 8) | p[2]) == nbr)
-            return true;
-    }
-    return false;
-}
-
 // count the number of lines up to and including the line pointed to by the argument
 // used for error reporting in programs that do not use line numbers
 int MIPS16 CountLines(unsigned char *target)
@@ -2532,6 +3024,501 @@ int MIPS16 CountLines(unsigned char *target)
 /********************************************************************************************************************************************
 routines for storing and manipulating variables
 ********************************************************************************************************************************************/
+
+#ifdef STRUCTENABLED
+/***********************************************************************************************
+ * FUNCTION: ValidateStructParam() - Validate and setup a struct parameter (NOT in RAM)
+ *
+ * Called from DefinedSubFun when a struct parameter is being passed.
+ * Returns 1 if handled (caller should continue to next param), 0 if not a struct case.
+ ***********************************************************************************************/
+#ifdef rp2350
+int ValidateStructParam(int varIndex, int argVarIndex, void *argval_s, int argtype, unsigned char *argname)
+#else
+int MIPS16 ValidateStructParam(int varIndex, int argVarIndex, void *argval_s, int argtype, unsigned char *argname)
+#endif
+{
+    // Check if definition expects a struct
+    if (!(g_vartbl[varIndex].type & T_STRUCT))
+        return 0; // Not a struct parameter
+
+    // Structs are always passed by reference (like arrays)
+    if (!(argtype & T_PTR))
+    {
+        error("Expected a structure variable: $", argname);
+    }
+
+    // Verify caller provided a struct
+    if (!(g_vartbl[argVarIndex].type & T_STRUCT))
+        error("Expected a structure variable: $", argname);
+
+    // Check struct types match (stored in size field)
+    if (g_vartbl[varIndex].size != g_vartbl[argVarIndex].size)
+        error("Structure type mismatch: $", argname);
+
+    // Free any memory allocated for local struct (findvar allocates memory)
+    if (g_vartbl[varIndex].val.s != NULL)
+    {
+        FreeMemorySafe((void **)&g_vartbl[varIndex].val.s);
+    }
+
+    // Set up pointer to caller's struct data
+    g_vartbl[varIndex].val.s = argval_s;
+    g_vartbl[varIndex].type |= T_PTR; // Mark as pointer so ClearVars won't free it
+
+    // Only copy dimensions if this is a whole array being passed (e.g., "arr()")
+    // NOT when passing a single array element (e.g., "arr(1)")
+    // Detect by checking if the argument has empty parentheses or an index
+    if (g_vartbl[argVarIndex].dims[0] != 0)
+    {
+        unsigned char *paren = (unsigned char *)strchr((char *)argname, '(');
+        int is_whole_array = 0;
+        if (paren)
+        {
+            paren++;
+            skipspace(paren);
+            if (*paren == ')')
+            {
+                is_whole_array = 1; // Empty parens = whole array
+            }
+        }
+        if (is_whole_array)
+        {
+            for (int j = 0; j < MAXDIM; j++)
+                g_vartbl[varIndex].dims[j] = g_vartbl[argVarIndex].dims[j];
+        }
+        // If not whole array, dims stay at 0 (single element)
+    }
+
+    return 1; // Handled
+}
+
+/***********************************************************************************************
+ * FUNCTION: CopyStructReturn() - Copy struct return value to temp memory (NOT in RAM)
+ *
+ * Called from DefinedSubFun when returning a struct from a function.
+ * Copies struct data to temporary memory so it survives ClearVars.
+ ***********************************************************************************************/
+#ifdef rp2350
+unsigned char *CopyStructReturn(void *struct_data, int struct_type_idx, int *out_struct_type)
+#else
+unsigned char MIPS16 *CopyStructReturn(void *struct_data, int struct_type_idx, int *out_struct_type)
+#endif
+{
+    int struct_size = g_structtbl[struct_type_idx]->total_size;
+
+    g_LocalIndex--; // allocate at caller's level
+    unsigned char *temp_struct = GetTempMemory(struct_size);
+    g_LocalIndex++;
+
+    memcpy(temp_struct, struct_data, struct_size);
+    *out_struct_type = struct_type_idx;
+
+    return temp_struct;
+}
+
+/***********************************************************************************************
+ * FUNCTION: ResolveStructMember() - Resolve struct member access (NOT in RAM for size savings)
+ *
+ * This unified function handles all struct member resolution:
+ *   - Simple struct: point.x
+ *   - Struct array element: points(0).x
+ *   - Nested structs: point.nested.x
+ *   - Array members: point.coords(0)
+ *   - Complex paths: points(0).nested(1).values(2)
+ *
+ * Parameters:
+ *   struct_ptr     - pointer to the base struct data
+ *   struct_idx     - index into g_structtbl for the struct type
+ *   member_path    - the member path string (e.g., "x" or "nested.member")
+ *   pp             - pointer to current parse position (updated on return for array indices)
+ *   member_type    - OUTPUT: the type of the final member (T_NBR, T_INT, T_STR, T_STRUCT)
+ *
+ * Returns: pointer to the member data, or NULL on error
+ ***********************************************************************************************/
+#ifdef rp2350
+void *ResolveStructMember(unsigned char *struct_ptr, int struct_idx, unsigned char *member_path,
+                          unsigned char **pp, int *member_type)
+#else
+void MIPS16 *ResolveStructMember(unsigned char *struct_ptr, int struct_idx, unsigned char *member_path,
+                                 unsigned char **pp, int *member_type)
+#endif
+{
+    int total_offset = 0;
+    int current_struct_idx = struct_idx;
+    unsigned char *current_member = member_path;
+    unsigned char *p = *pp;
+    int nest_depth = 0;
+
+    while (1)
+    {
+        if (++nest_depth > MAX_STRUCT_NEST_DEPTH)
+            error("Structure nesting too deep (max %)", MAX_STRUCT_NEST_DEPTH);
+
+        // Extract current member name (up to dot, paren, type suffix, or end)
+        unsigned char single_member[MAXVARLEN + 1];
+        int single_len = 0;
+        while (current_member[single_len] &&
+               current_member[single_len] != '.' &&
+               current_member[single_len] != '(' &&
+               single_len < MAXVARLEN)
+        {
+            single_member[single_len] = current_member[single_len];
+            single_len++;
+        }
+        single_member[single_len] = 0;
+
+        // Check for next dot in the member path string
+        unsigned char *next_dot = NULL;
+        if (current_member[single_len] == '.')
+        {
+            next_dot = &current_member[single_len];
+        }
+
+        // Find this member in the current struct
+        int m_type, m_offset, m_size;
+        short m_dims[MAXDIM] = {0};
+        int member_idx = FindStructMember(current_struct_idx, single_member, &m_type, &m_offset, &m_size, m_dims);
+        if (member_idx < 0)
+            error("Unknown structure member");
+
+        total_offset += m_offset;
+
+        // Determine if there's more to resolve
+        skipspace(p);
+        int more_to_resolve = (next_dot != NULL);
+
+        // Check if p has array index followed by dot (e.g., nested(1).x)
+        if (!more_to_resolve && m_type == T_STRUCT && m_dims[0] != 0 && *p == '(')
+        {
+            unsigned char *check = p;
+            int depth = 0;
+            while (*check)
+            {
+                if (*check == '(')
+                    depth++;
+                else if (*check == ')')
+                {
+                    depth--;
+                    if (depth == 0)
+                    {
+                        check++;
+                        break;
+                    }
+                }
+                check++;
+            }
+            skipspace(check);
+            if (*check == '.')
+                more_to_resolve = 1;
+        }
+
+        // Also check for dot directly after member name in p
+        if (!more_to_resolve && *p == '.')
+        {
+            more_to_resolve = 1;
+        }
+
+        if (more_to_resolve)
+        {
+            // More members to resolve - this must be a nested struct
+            if (m_type != T_STRUCT)
+                error("Not a nested structure");
+
+            // Handle array of nested structs
+            if (m_dims[0] != 0)
+            {
+                skipspace(p);
+                if (*p != '(')
+                    error("Array of nested structures requires index");
+
+                int nested_struct_size = g_structtbl[m_size]->total_size;
+
+                // Find closing paren
+                unsigned char *pstart = p;
+                int paren_depth = 0;
+                unsigned char *pend = p;
+                while (*pend)
+                {
+                    if (*pend == '(')
+                        paren_depth++;
+                    else if (*pend == ')')
+                    {
+                        paren_depth--;
+                        if (paren_depth == 0)
+                        {
+                            pend++;
+                            break;
+                        }
+                    }
+                    pend++;
+                }
+
+                // Copy to local buffer and parse
+                unsigned char idx_buf[128];
+                int blen = pend - pstart;
+                if (blen >= 128)
+                    blen = 127;
+                memcpy(idx_buf, pstart, blen);
+                idx_buf[blen] = 0;
+
+                unsigned char *argptr = idx_buf;
+                int mem_dim[MAXDIM] = {0};
+                int mem_dnbr;
+
+                getargs(&argptr, MAXDIM * 2, (unsigned char *)"(,");
+                if ((argc & 0x01) == 0)
+                    error("Dimensions");
+                mem_dnbr = argc / 2 + 1;
+
+                for (int ai = 0; ai < argc; ai += 2)
+                {
+                    MMFLOAT f;
+                    long long int in;
+                    char *s;
+                    int targ = T_NOTYPE;
+                    evaluate(argv[ai], &f, &in, (unsigned char **)&s, &targ, false);
+                    if (targ == T_NBR)
+                        in = FloatToInt32(f);
+                    mem_dim[ai / 2] = (int)in;
+                }
+
+                // Check dimensions and bounds
+                int expected_dims = 0;
+                for (int di = 0; di < MAXDIM && m_dims[di] != 0; di++)
+                    expected_dims++;
+                if (mem_dnbr != expected_dims)
+                    error("Wrong number of dimensions");
+                for (int di = 0; di < mem_dnbr; di++)
+                {
+                    if (mem_dim[di] < g_OptionBase || mem_dim[di] > m_dims[di])
+                        error("Index out of bounds");
+                }
+
+                // Calculate linear offset
+                int linear_idx = mem_dim[0] - g_OptionBase;
+                int mult = 1;
+                for (int di = 1; di < mem_dnbr; di++)
+                {
+                    mult *= (m_dims[di - 1] + 1 - g_OptionBase);
+                    linear_idx += (mem_dim[di] - g_OptionBase) * mult;
+                }
+
+                total_offset += linear_idx * nested_struct_size;
+                p = pend;
+            }
+
+            // Move to nested struct
+            current_struct_idx = m_size;
+
+            // Get next member from path or from p
+            if (next_dot != NULL)
+            {
+                current_member = next_dot + 1;
+            }
+            else
+            {
+                skipspace(p);
+                if (*p == '.')
+                {
+                    p++;
+                    // Copy member name from p
+                    unsigned char membuf[MAXVARLEN + 1];
+                    int ml = 0;
+                    while (isnamechar(*p) && ml < MAXVARLEN)
+                    {
+                        membuf[ml++] = *p++;
+                    }
+                    membuf[ml] = 0;
+                    if (*p == '$' || *p == '%' || *p == '!')
+                        p++;
+                    // Use static buffer for continuation
+                    static unsigned char cont_member[MAXVARLEN + 1];
+                    memcpy(cont_member, membuf, ml + 1);
+                    current_member = cont_member;
+                }
+            }
+            continue;
+        }
+
+        // Final member - handle array indexing
+        int array_offset = 0;
+        skipspace(p);
+
+        if (*p == '(')
+        {
+            if (m_dims[0] == 0)
+                error("Not an array member");
+
+            int element_size = m_size;
+            if (m_type & T_STR)
+                element_size = m_size + 1;
+
+            unsigned char *pstart = p;
+            int paren_depth = 0;
+            unsigned char *pend = p;
+            while (*pend)
+            {
+                if (*pend == '(')
+                    paren_depth++;
+                else if (*pend == ')')
+                {
+                    paren_depth--;
+                    if (paren_depth == 0)
+                    {
+                        pend++;
+                        break;
+                    }
+                }
+                pend++;
+            }
+
+            unsigned char idx_buf[128];
+            int blen = pend - pstart;
+            if (blen >= 128)
+                blen = 127;
+            memcpy(idx_buf, pstart, blen);
+            idx_buf[blen] = 0;
+
+            unsigned char *argptr = idx_buf;
+            int mem_dim[MAXDIM] = {0};
+            int mem_dnbr;
+
+            getargs(&argptr, MAXDIM * 2, (unsigned char *)"(,");
+            if ((argc & 0x01) == 0)
+                error("Dimensions");
+            mem_dnbr = argc / 2 + 1;
+
+            for (int ai = 0; ai < argc; ai += 2)
+            {
+                MMFLOAT f;
+                long long int in;
+                char *s;
+                int targ = T_NOTYPE;
+                evaluate(argv[ai], &f, &in, (unsigned char **)&s, &targ, false);
+                if (targ == T_NBR)
+                    in = FloatToInt32(f);
+                mem_dim[ai / 2] = (int)in;
+            }
+
+            // Check dimensions and bounds
+            int expected_dims = 0;
+            for (int di = 0; di < MAXDIM && m_dims[di] != 0; di++)
+                expected_dims++;
+            if (mem_dnbr != expected_dims)
+                error("Wrong number of dimensions");
+            for (int di = 0; di < mem_dnbr; di++)
+            {
+                if (mem_dim[di] < g_OptionBase || mem_dim[di] > m_dims[di])
+                    error("Index out of bounds");
+            }
+
+            // Calculate linear offset
+            int linear_idx = mem_dim[0] - g_OptionBase;
+            int mult = 1;
+            for (int di = 1; di < mem_dnbr; di++)
+            {
+                mult *= (m_dims[di - 1] + 1 - g_OptionBase);
+                linear_idx += (mem_dim[di] - g_OptionBase) * mult;
+            }
+            array_offset = linear_idx * element_size;
+            p = pend;
+        }
+        else if (m_dims[0] != 0 && m_type != T_STRUCT)
+        {
+            error("Array member requires index");
+        }
+
+        // Set globals for STRUCT EXTRACT/INSERT/SORT
+        g_StructMemberOffset = total_offset;
+        g_StructMemberSize = m_size;
+
+        *member_type = m_type;
+        *pp = p;
+        return (void *)(struct_ptr + total_offset + array_offset);
+    }
+}
+
+/***********************************************************************************************
+ * FUNCTION: FindStructBase() - Find base struct variable by name (NOT in RAM)
+ *
+ * Searches local and global variables for a struct variable by name.
+ * Returns variable index or -1 if not found or not a struct.
+ ***********************************************************************************************/
+#ifdef rp2350
+int FindStructBase(unsigned char *basename, int baselen, int *pvindex)
+#else
+int MIPS16 FindStructBase(unsigned char *basename, int baselen, int *pvindex)
+#endif
+{
+    int vindex = -1;
+
+    // Calculate hash for base name
+    uint32_t hash = FNV_offset_basis;
+    for (int i = 0; i < baselen; i++)
+    {
+        hash ^= basename[i];
+        hash *= FNV_prime;
+    }
+
+    // Search local variables first
+    if (g_LocalIndex)
+    {
+        int LocalhashIndex = hash % maxlocalvars;
+        int OrigLocalHash = LocalhashIndex - 1;
+        if (OrigLocalHash < 0)
+            OrigLocalHash += maxlocalvars;
+
+        while (g_vartbl[LocalhashIndex].type != T_NOTYPE)
+        {
+            if (memcmp(g_vartbl[LocalhashIndex].name, basename, baselen) == 0 &&
+                (baselen == MAXVARLEN || g_vartbl[LocalhashIndex].name[baselen] == 0) &&
+                g_vartbl[LocalhashIndex].level == g_LocalIndex)
+            {
+                vindex = LocalhashIndex;
+                break;
+            }
+            LocalhashIndex++;
+            if (LocalhashIndex >= maxlocalvars)
+                LocalhashIndex = 0;
+            if (LocalhashIndex == OrigLocalHash)
+                break;
+        }
+    }
+
+    // Search global variables
+    if (vindex < 0)
+    {
+        int GlobalhashIndex = (hash % maxglobalvars) + maxlocalvars;
+        int OrigGlobalHash = GlobalhashIndex - 1;
+        if (OrigGlobalHash < maxlocalvars)
+            OrigGlobalHash += maxglobalvars;
+
+        while (g_vartbl[GlobalhashIndex].type != T_NOTYPE)
+        {
+            if (memcmp(g_vartbl[GlobalhashIndex].name, basename, baselen) == 0 &&
+                (baselen == MAXVARLEN || g_vartbl[GlobalhashIndex].name[baselen] == 0))
+            {
+                vindex = GlobalhashIndex;
+                break;
+            }
+            GlobalhashIndex++;
+            if (GlobalhashIndex >= MAXVARS)
+                GlobalhashIndex = maxlocalvars;
+            if (GlobalhashIndex == OrigGlobalHash)
+                break;
+        }
+    }
+
+    if (vindex >= 0)
+    {
+        *pvindex = vindex;
+        if (g_vartbl[vindex].type & T_STRUCT)
+            return (int)g_vartbl[vindex].size; // Return struct type index
+    }
+    return -1; // Not found or not a struct
+}
+#endif
 
 // find or create a variable
 // the action parameter can be the following (these can be ORed together)
@@ -2584,7 +3571,13 @@ void MIPS32 __not_in_flash_func (*findvar)(unsigned char *p, int action)
 #ifdef rp2350
     uint32_t funhash;
 #endif
+#ifdef STRUCTENABLED
+    g_StructMemberType = 0;   // Reset struct member type flag
+    g_StructMemberOffset = 0; // Reset struct member offset
+    g_StructMemberSize = 0;   // Reset struct member size
+#endif
     emptyarray = 0;
+
     // check the first char for a legal variable name
     skipspace(p);
     if (!isnamestart(*p))
@@ -2609,6 +3602,7 @@ void MIPS32 __not_in_flash_func (*findvar)(unsigned char *p, int action)
     tmp = -1;
     if (namelen != MAXVARLEN)
         *s = 0;
+
     // check the terminating char and set the type
     if (*p == '$')
     {
@@ -2638,6 +3632,53 @@ void MIPS32 __not_in_flash_func (*findvar)(unsigned char *p, int action)
         error("Variable type not specified");
     else
         vtype = 0;
+
+#ifdef STRUCTENABLED
+    // Check for struct member access (variable.member or variable.nested.member)
+    {
+        unsigned char *dot = (unsigned char *)strchr((char *)name, '.');
+        if (dot != NULL)
+        {
+            // Split name into base and member
+            int baselen = dot - name;
+            unsigned char basename[MAXVARLEN + 1];
+            unsigned char membername[MAXVARLEN + 1];
+            memcpy(basename, name, baselen);
+            basename[baselen] = 0;
+
+            // Copy member path
+            unsigned char *src = dot + 1;
+            int mlen = 0;
+            while (src[mlen] && mlen < MAXVARLEN)
+            {
+                membername[mlen] = src[mlen];
+                mlen++;
+            }
+            membername[mlen] = 0;
+
+            // Find the base struct variable using helper (NOT in RAM)
+            int member_type;
+            int struct_idx = FindStructBase(basename, baselen, &vindex);
+
+            if (struct_idx >= 0)
+            {
+                // Found a valid struct - resolve the member path using helper (NOT in RAM)
+                void *result = ResolveStructMember(
+                    g_vartbl[vindex].val.s, // struct data pointer
+                    struct_idx,             // struct type index
+                    membername,             // member path
+                    &p,                     // parse position (updated)
+                    &member_type            // OUTPUT: member type
+                );
+
+                g_VarIndex = vindex;
+                g_StructMemberType = member_type;
+                return result;
+            }
+            // Not a struct - fall through to normal processing
+        }
+    }
+#endif
 
     // check if this is an array
     if (*p == '(')
@@ -2676,6 +3717,23 @@ void MIPS32 __not_in_flash_func (*findvar)(unsigned char *p, int action)
                 dim[i / 2] = in;
                 if (dim[i / 2] < g_OptionBase)
                     error("Dimensions");
+            }
+
+            // After getargs, advance p past the (indices) - makeargs doesn't update *p
+            // This is needed for struct array member access like points(4).x
+            if (*p == '(')
+            {
+                unsigned char *ptemp = p + 1;
+                int depth = 1;
+                while (depth > 0 && *ptemp)
+                {
+                    if (*ptemp == '(' || (tokentype(*ptemp) & T_FUN))
+                        depth++;
+                    else if (*ptemp == ')')
+                        depth--;
+                    ptemp++;
+                }
+                p = ptemp; // Now points past the closing )
             }
         }
     }
@@ -2901,6 +3959,47 @@ void MIPS32 __not_in_flash_func (*findvar)(unsigned char *p, int action)
         // if it is a non arrayed variable or an empty array it is easy, just calculate and return a pointer to the value
         if (dnbr == -1 || g_vartbl[vindex].dims[0] == 0)
         {
+#ifdef STRUCTENABLED
+            // For empty array struct access like sortArr().x, skip past () first
+            if (dnbr == -1 && (g_vartbl[vindex].type & T_STRUCT) && *p == '(')
+            {
+                p++; // skip (
+                skipspace(p);
+                if (*p == ')')
+                    p++; // skip )
+                skipspace(p);
+            }
+            // Check for struct member access on simple (non-array) struct: pt.x or sortArr().x
+            if ((g_vartbl[vindex].type & T_STRUCT) && *p == '.')
+            {
+                unsigned char *struct_ptr = g_vartbl[vindex].val.s;
+                int struct_idx = (int)g_vartbl[vindex].size;
+
+                p++; // skip the dot
+
+                // Parse member name into buffer
+                unsigned char membername[MAXVARLEN + 1];
+                int mn = 0;
+                while (isnamechar(*p) && mn < MAXVARLEN)
+                {
+                    membername[mn++] = *p++;
+                }
+                membername[mn] = 0;
+                if (*p == '$' || *p == '%' || *p == '!')
+                    p++;
+
+                // Use unified helper (NOT in RAM)
+                int member_type;
+                void *result = ResolveStructMember(struct_ptr, struct_idx, membername, &p, &member_type);
+                g_StructMemberType = member_type;
+                return result;
+            }
+            // For whole struct access (no member), return pointer to struct data
+            if (g_vartbl[vindex].type & T_STRUCT)
+            {
+                return g_vartbl[vindex].val.s;
+            }
+#endif
             if (dnbr == -1 || g_vartbl[vindex].type & (T_PTR | T_STR))
                 return g_vartbl[vindex].val.s; // if it is a string or pointer just return the pointer to the data
             else if (g_vartbl[vindex].type & (T_INT))
@@ -2927,6 +4026,45 @@ void MIPS32 __not_in_flash_func (*findvar)(unsigned char *p, int action)
             j *= (g_vartbl[vindex].dims[i - 1] + 1 - g_OptionBase);
             nbr += (dim[i] - g_OptionBase) * j;
         }
+
+#ifdef STRUCTENABLED
+        // Check for struct member access after array index: points(0).x or points(0).nested.member
+        if (g_vartbl[vindex].type & T_STRUCT)
+        {
+            int current_struct_idx = (int)g_vartbl[vindex].size;
+            if (current_struct_idx < 0 || current_struct_idx >= g_structcnt)
+                error("Invalid structure type index");
+            int struct_size = g_structtbl[current_struct_idx]->total_size;
+            unsigned char *struct_ptr = g_vartbl[vindex].val.s + (nbr * struct_size);
+
+            skipspace(p);
+            if (*p == '.')
+            {
+                p++; // skip the dot
+
+                // Parse member name into buffer
+                unsigned char membername[MAXVARLEN + 1];
+                int mn = 0;
+                while (isnamechar(*p) && mn < MAXVARLEN)
+                {
+                    membername[mn++] = *p++;
+                }
+                membername[mn] = 0;
+                if (*p == '$' || *p == '%' || *p == '!')
+                    p++;
+
+                // Use unified helper (NOT in RAM)
+                int member_type;
+                void *result = ResolveStructMember(struct_ptr, current_struct_idx, membername, &p, &member_type);
+                g_StructMemberType = member_type;
+                return result;
+            }
+            // No member access - return whole struct element
+            g_StructMemberType = 0;
+            return struct_ptr;
+        }
+#endif
+
         // finally return a pointer to the value
         if (g_vartbl[vindex].type & T_NBR)
             return g_vartbl[vindex].val.s + (nbr * sizeof(MMFLOAT));
@@ -2946,7 +4084,11 @@ void MIPS32 __not_in_flash_func (*findvar)(unsigned char *p, int action)
     if (vtype == 0)
     {
         if (action & T_IMPLIED)
+#ifdef STRUCTENABLED
+            vtype = (action & (T_NBR | T_INT | T_STR | T_STRUCT));
+#else
             vtype = (action & (T_NBR | T_INT | T_STR));
+#endif
         else
             vtype = DefaultType;
     }
@@ -3060,9 +4202,10 @@ void MIPS32 __not_in_flash_func (*findvar)(unsigned char *p, int action)
         *x++ = *s++;
     if (namelen < MAXVARLEN)
         *x++ = 0;
+    g_vartbl[ifree].namelen = 0; // Initialize flags field (no longer stores length)
     g_vartbl[ifree].type = vtype | (action & (T_IMPLIED | T_CONST));
     if (suffix)
-        g_vartbl[ifree].type |= T_EXPLICIT;
+        g_vartbl[ifree].namelen |= NAMELEN_EXPLICIT;
     if (ifree < maxlocalvars) // CHANGED: was MAXVARS/2
     {
         g_hashlist[g_hashlistpointer].level = g_LocalIndex;
@@ -3088,12 +4231,32 @@ void MIPS32 __not_in_flash_func (*findvar)(unsigned char *p, int action)
             g_vartbl[ifree].val.i = 0;
             return &(g_vartbl[ifree].val.i);
         }
+#ifdef STRUCTENABLED
+        else if (vtype & T_STRUCT)
+        {
+            // Simple (non-array) structure variable
+            // g_StructArg contains the structure definition index
+            if (g_StructArg < 0 || g_StructArg >= g_structcnt)
+                error("Invalid structure type");
+            int structsize = g_structtbl[g_StructArg]->total_size;
+            g_vartbl[ifree].size = g_StructArg; // Store struct index in size field
+            g_vartbl[ifree].val.s = GetMemory(structsize);
+            return g_vartbl[ifree].val.s;
+        }
+#endif
     }
 
     // if this is a definition of an empty array (only used in the parameter list for a sub/function)
     if (dnbr == -1)
     {
         g_vartbl[vindex].dims[0] = -1; // let the caller know that this is an empty array and needs more work
+#ifdef STRUCTENABLED
+        // For struct array parameters, store the struct type index from g_StructArg
+        if ((vtype & T_STRUCT) && g_StructArg >= 0 && g_StructArg < g_structcnt)
+        {
+            g_vartbl[vindex].size = g_StructArg;
+        }
+#endif
         return g_vartbl[vindex].val.s; // just return a pointer to the data element as it will be replaced in the sub/fun with a pointer
     }
 
@@ -3129,6 +4292,18 @@ void MIPS32 __not_in_flash_func (*findvar)(unsigned char *p, int action)
         else
             mptr = GetMemory(tmp);
     }
+#ifdef STRUCTENABLED
+    else if (vtype & T_STRUCT)
+    {
+        // Structure array
+        if (g_StructArg < 0 || g_StructArg >= g_structcnt)
+            error("Invalid structure type");
+        int structsize = g_structtbl[g_StructArg]->total_size;
+        tmp = nbr * structsize;
+        mptr = GetMemory(tmp);
+        size = g_StructArg; // Store struct index in size field
+    }
+#endif
     else
     {
         tmp = (nbr * (size + 1));
@@ -3145,7 +4320,7 @@ void MIPS32 __not_in_flash_func (*findvar)(unsigned char *p, int action)
     // allocated memory
     g_vartbl[ifree].type = vtype | (action & (T_IMPLIED | T_CONST));
     if (suffix)
-        g_vartbl[ifree].type |= T_EXPLICIT;
+        g_vartbl[ifree].namelen |= NAMELEN_EXPLICIT;
     *g_vartbl[ifree].name = i;
     g_vartbl[ifree].dims[0] = j;
     g_vartbl[ifree].size = size;
@@ -3780,6 +4955,7 @@ const char *errorstring[] = {
     "SYSTEM I2C not configured",                                   // 44
     "System SPI not configured",                                   // 45
     "Illegal escape sequence, use CHR$(0) for the Null character", // 46
+    "Struct member arrays not supported for this command",         // 47
 };
 void StandardError(int n)
 {
@@ -4029,7 +5205,7 @@ Various routines to clear memory or the interpreter's state
  * - Local variable loop now goes from 0 to maxlocalvars-1
  * - Global variable section starts at maxlocalvars instead of MAXVARS/2
  ***********************************************************************************************/
-#ifdef LOWRAM
+#if defined(PICOMITEWEB) && !defined(rp2350)
 void MIPS32 ClearVars(int level, bool all)
 #else
 void MIPS32 __not_in_flash_func(ClearVars)(int level, bool all)
@@ -4048,14 +5224,23 @@ void MIPS32 __not_in_flash_func(ClearVars)(int level, bool all)
                 hashnext = hashcurrent = g_hashlist[i].hash;
                 hashnext++;
                 hashnext %= maxlocalvars; // CHANGED: was MAXVARS/2
+                                          // Free memory for strings, arrays, and structs (but not pointers to caller's data)
+#ifdef STRUCTENABLED
+                if (((g_vartbl[hashcurrent].type & T_STR) || g_vartbl[hashcurrent].dims[0] != 0 || (g_vartbl[hashcurrent].type & T_STRUCT)) && !(g_vartbl[hashcurrent].type & T_PTR) && ((uint32_t)g_vartbl[hashcurrent].val.s < (uint32_t)MMHeap + heap_memory_size) && ((uint32_t)g_vartbl[hashcurrent].val.s > (uint32_t)MMHeap))
+#else
                 if (((g_vartbl[hashcurrent].type & T_STR) || g_vartbl[hashcurrent].dims[0] != 0) && !(g_vartbl[hashcurrent].type & T_PTR) && ((uint32_t)g_vartbl[hashcurrent].val.s < (uint32_t)MMHeap + heap_memory_size) && ((uint32_t)g_vartbl[hashcurrent].val.s > (uint32_t)MMHeap))
+#endif
                 {
                     FreeMemorySafe((void **)&g_vartbl[hashcurrent].val.s);
                     // free any memory (if allocated)
                 }
 #ifdef rp2350
 #ifndef PICOMITEWEB
+#ifdef STRUCTENABLED
+                if (((g_vartbl[hashcurrent].type & T_STR) || g_vartbl[hashcurrent].dims[0] != 0 || (g_vartbl[hashcurrent].type & T_STRUCT)) && !(g_vartbl[hashcurrent].type & T_PTR) && ((uint32_t)g_vartbl[hashcurrent].val.s > (uint32_t)PSRAMbase && (uint32_t)g_vartbl[hashcurrent].val.s < (uint32_t)PSRAMbase + PSRAMsize))
+#else
                 if (((g_vartbl[hashcurrent].type & T_STR) || g_vartbl[hashcurrent].dims[0] != 0) && !(g_vartbl[hashcurrent].type & T_PTR) && ((uint32_t)g_vartbl[hashcurrent].val.s > (uint32_t)PSRAMbase && (uint32_t)g_vartbl[hashcurrent].val.s < (uint32_t)PSRAMbase + PSRAMsize))
+#endif
                 {
                     FreeMemorySafe((void **)&g_vartbl[hashcurrent].val.s); // free any memory (if allocated)
                 }
@@ -4078,7 +5263,12 @@ void MIPS32 __not_in_flash_func(ClearVars)(int level, bool all)
     {
         for (i = 0; i < MAXVARS; i++) // CHANGED: still scans entire table (locals + globals)
         {
+            // Free memory for strings, arrays, and structs (but not pointers)
+#ifdef STRUCTENABLED
+            if (((g_vartbl[i].type & T_STR) || g_vartbl[i].dims[0] != 0 || (g_vartbl[i].type & T_STRUCT)) && !(g_vartbl[i].type & T_PTR))
+#else
             if (((g_vartbl[i].type & T_STR) || g_vartbl[i].dims[0] != 0) && !(g_vartbl[i].type & T_PTR))
+#endif
             {
                 if ((uint32_t)g_vartbl[i].val.s > (uint32_t)MMHeap && (uint32_t)g_vartbl[i].val.s < (uint32_t)MMHeap + heap_memory_size)
                 {
@@ -4089,7 +5279,11 @@ void MIPS32 __not_in_flash_func(ClearVars)(int level, bool all)
 #ifndef PICOMITEWEB
             if (all)
             {
+#ifdef STRUCTENABLED
+                if (((g_vartbl[i].type & T_STR) || g_vartbl[i].dims[0] != 0 || (g_vartbl[i].type & T_STRUCT)) && !(g_vartbl[i].type & T_PTR))
+#else
                 if (((g_vartbl[i].type & T_STR) || g_vartbl[i].dims[0] != 0) && !(g_vartbl[i].type & T_PTR))
+#endif
                 {
                     if ((uint32_t)g_vartbl[i].val.s > (uint32_t)PSRAMbase && (uint32_t)g_vartbl[i].val.s < (uint32_t)PSRAMbase + PSRAMsize)
                     {
@@ -4184,7 +5378,12 @@ uint32_t erase(char *p, bool nofree)
         // found the variable
 
         // BUG FIX: Add bounds checking before freeing memory
+        // Handle strings, arrays, and struct variables (but not pointers)
+#ifdef STRUCTENABLED
+        if (((g_vartbl[j].type & T_STR) || g_vartbl[j].dims[0] != 0 || (g_vartbl[j].type & T_STRUCT)) && !(g_vartbl[j].type & T_PTR))
+#else
         if (((g_vartbl[j].type & T_STR) || g_vartbl[j].dims[0] != 0) && !(g_vartbl[j].type & T_PTR))
+#endif
         {
             addr = (uint32_t)g_vartbl[j].val.s; // ADDED: get address once
 
@@ -4337,7 +5536,21 @@ void MIPS16 ClearRuntime(bool all)
     MMerrno = 0; // clear the error flags
     *MMErrMsg = 0;
     ClearVars(0, true);
+#ifndef PICOMITEWEB
+    turtle_free(); // Free turtle state before heap is wiped
+#endif
     InitHeap(true);
+#ifdef STRUCTENABLED
+    // After InitHeap, all heap memory tracking is reset. The g_structtbl pointers
+    // now point to memory without valid allocation tracking. We must NULL them
+    // WITHOUT calling FreeMemorySafe, because FreeMemory would corrupt the heap
+    // when it tries to walk the (now zeroed) allocation bitmap.
+    for (i = 0; i < MAX_STRUCT_TYPES; i++)
+    {
+        g_structtbl[i] = NULL;
+    }
+    g_structcnt = 0;
+#endif
     m_alloc(all ? M_VAR : M_LIMITED);
     memset(cmdlinebuff, 0, sizeof(cmdlinebuff));
     memset(datastore, 0, sizeof(struct sa_data) * MAXRESTORE);
@@ -4376,10 +5589,12 @@ void MIPS16 ClearProgram(bool psram)
     StartEditChar = 0;
     ProgramChanged = false;
     TraceOn = false;
+    // Note: g_structtbl is cleared by ClearRuntime->InitHeap path
+    // No need to free here as InitHeap wipes the heap tracking
 }
 
 // round a float to an integer
-#ifdef LOWRAM
+#if LOWRAM
 int FloatToInt32(MMFLOAT x)
 {
 #else
@@ -4507,6 +5722,67 @@ unsigned char MIPS16 __not_in_flash_func (*skipvar)(unsigned char *p, int noerro
         }
         p++; // step over the closing bracket
     }
+
+#ifdef STRUCTENABLED
+    // Handle struct member access (e.g., points(0).x or point.x or point.nested(1).x)
+    // Note: The '.' may still be a literal char in the tokenized stream
+    // Loop to handle multiple levels of nesting
+    while (1)
+    {
+        pp = p;
+        skipspace(pp);
+        if (*pp != '.')
+            break; // No more member access
+
+        p = pp + 1; // skip the dot
+        // skip the member name
+        if (!isnamestart(*p))
+        {
+            if (noerror)
+                return p;
+            error("Expected member name after '.'");
+        }
+        do
+        {
+            p++;
+        } while (isnamechar(*p));
+        // check for type suffix on member
+        if (*p == '$' || *p == '%' || *p == '!')
+            p++;
+        // Check for array index on member (e.g., point.coords(0) or point.nested(1).x)
+        pp = p;
+        skipspace(pp);
+        if (*pp == '(')
+        {
+            p = pp + 1;
+            i = 1;
+            inquote = false;
+            while (1)
+            {
+                if (*p == '\"')
+                    inquote = !inquote;
+                if (*p == 0)
+                {
+                    if (noerror)
+                        return p;
+                    error("Expected closing bracket");
+                }
+                if (!inquote)
+                {
+                    if (*p == ')')
+                        if (--i == 0)
+                            break;
+                    if (*p == '(' || (tokentype(*p) & T_FUN))
+                        i++;
+                }
+                p++;
+            }
+            p++; // step over closing bracket
+        }
+        // Loop continues to check for another dot
+    }
+#endif
+
     return p;
 }
 
@@ -4811,19 +6087,5 @@ int __not_in_flash_func(str_equal)(const unsigned char *s1, const unsigned char 
             return 0;
     }
     return 0;
-}
-
-// Compare two areas of memory, ignoring case differences.
-// Returns true if they are equal (ignoring case) otherwise returns false.
-int mem_equal(unsigned char *s1, unsigned char *s2, int i)
-{
-    if (mytoupper(*(unsigned char *)s1) != mytoupper(*(unsigned char *)s2))
-        return 0;
-    while (--i)
-    {
-        if (mytoupper(*(unsigned char *)++s1) != mytoupper(*(unsigned char *)++s2))
-            return 0;
-    }
-    return 1;
 }
 /*  @endcond */

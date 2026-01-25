@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.13)
 # Valid builds are PICO, PICOUSB, VGA, VGAUSB, HDMI(rp2350 only), HDMIUSB(rp2350 only), WEB
 
 
-#set(COMPILE HDMIUSB)
+#set(COMPILE VGA)
 
 if (COMPILE STREQUAL "HDMI" OR COMPILE STREQUAL "WEBRP2350" OR COMPILE STREQUAL "HDMIUSB"  OR COMPILE STREQUAL "VGARP2350"  OR COMPILE STREQUAL "VGAUSBRP2350"  OR COMPILE STREQUAL "PICORP2350"  OR COMPILE STREQUAL "PICOUSBRP2350" )
 	set(PICO_PLATFORM rp2350)
@@ -25,9 +25,13 @@ set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 17)
 #set(PICO_NO_COPRO_DIS 1)
 pico_sdk_init()
+if (COMPILE STREQUAL "HDMI" OR COMPILE STREQUAL "WEBRP2350" OR COMPILE STREQUAL "HDMIUSB"  OR COMPILE STREQUAL "VGARP2350"  OR COMPILE STREQUAL "VGAUSBRP2350"  OR COMPILE STREQUAL "PICORP2350"  OR COMPILE STREQUAL "PICOUSBRP2350" )
+	add_compile_options(-Os)
+else()
+	add_compile_options(-O2)
+endif()
 add_executable(PicoMite
 	PicoMite.c
-#	regex.c 
 	MMBasic.c
 	Operators.c
 	Custom.c
@@ -136,13 +140,16 @@ set_source_files_properties(I2C.c PROPERTIES COMPILE_FLAGS -Os)
 set_source_files_properties(lfs.c PROPERTIES COMPILE_FLAGS -Os)
 set_source_files_properties(picojpeg.c PROPERTIES COMPILE_FLAGS -Os)
 set_source_files_properties(re.c PROPERTIES COMPILE_FLAGS -Os)
-set_source_files_properties(regex.c PROPERTIES COMPILE_FLAGS -Os)
 set_source_files_properties(hxcmod.c PROPERTIES COMPILE_FLAGS -Os)
 set_source_files_properties(MATHS.c PROPERTIES COMPILE_FLAGS -Os)
 set_source_files_properties(Editor.c PROPERTIES COMPILE_FLAGS -Os)
 set_source_files_properties(aes.c PROPERTIES COMPILE_FLAGS -Os)
 pico_generate_pio_header(PicoMite ${CMAKE_CURRENT_LIST_DIR}/PicoMiteI2S.pio)
 if (COMPILE STREQUAL "VGAUSB" OR COMPILE STREQUAL "VGA" OR COMPILE STREQUAL "PICO" OR COMPILE STREQUAL "PICOUSB" OR COMPILE STREQUAL "WEB")
+	set_source_files_properties(Audio.c PROPERTIES COMPILE_FLAGS -Os)
+	set_source_files_properties(Serial.c PROPERTIES COMPILE_FLAGS -Os)
+	set_source_files_properties(SSD1963.c PROPERTIES COMPILE_FLAGS -Os)
+	set_source_files_properties(Custom.c PROPERTIES COMPILE_FLAGS -Os)
 	pico_define_boot_stage2(slower_boot2 ${PICO_DEFAULT_BOOT_STAGE2_FILE})
 	target_compile_definitions(slower_boot2 PRIVATE PICO_FLASH_SPI_CLKDIV=4)
 	pico_set_boot_stage2(PicoMite slower_boot2)
@@ -176,6 +183,7 @@ target_compile_options(PicoMite PRIVATE -DNDEBUG
 										-DPICO_FLASH_SIZE_BYTES=16777216
 										-DPICO_CORE1_STACK_SIZE=0x00
 										-DPICO_MALLOC_PANIC
+										-DSTRUCTENABLED
 										-DGCODE
 										-O2
 										-Wall)

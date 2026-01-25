@@ -62,13 +62,13 @@ const struct Displays display_details[] = {
 	{26, "ST7789RSpeed", 6000000, 320, 240, 16, 0, SPI_POLARITY_LOW, SPI_PHASE_1EDGE},
 	{27, "", SLOW_TOUCH_SPEED, 0, 0, 0, 0, SPI_POLARITY_LOW, SPI_PHASE_1EDGE},
 	{28, "User", 0, 0, 0, 0, 0, 0, 0},
-	{29, "Dummy", 0, 0, 0, 0, 0, 0, 0},
-	{30, "Dummy", 0, 0, 0, 0, 0, 0, 0},
-	{31, "Dummy", 0, 0, 0, 0, 0, 0, 0},
-	{32, "Dummy", 0, 0, 0, 0, 0, 0, 0},
-	{33, "Dummy", 0, 0, 0, 0, 0, 0, 0},
-	{34, "Dummy", 0, 0, 0, 0, 0, 0, 0},
-	{35, "Dummy", 0, 0, 0, 0, 0, 0, 0},
+	{29, "MODE1", 0, 0, 0, 0, 0, 0, 0},
+	{30, "MODE2", 0, 0, 0, 0, 0, 0, 0},
+	{31, "MODE3", 0, 0, 0, 0, 0, 0, 0},
+	{32, "MODE4", 0, 0, 0, 0, 0, 0, 0},
+	{33, "MODE5", 0, 0, 0, 0, 0, 0, 0},
+	{34, "MODE6", 0, 0, 0, 0, 0, 0, 0},
+	{35, "MODE7", 0, 0, 0, 0, 0, 0, 0},
 	{36, "SSD1963_4", 0, 0, 0, 0, 0, 0, 0},
 	{37, "SSD1963_5", 0, 0, 0, 0, 0, 0, 0},
 	{38, "SSD1963_5A", 0, 0, 0, 0, 0, 0, 0},
@@ -93,7 +93,7 @@ const struct Displays display_details[] = {
 	{57, "VS1053fast", 4000000, 0, 0, 0, 0, SPI_POLARITY_LOW, SPI_PHASE_1EDGE},
 #if PICOMITERP2350
 	{58, "Dummy", 0, 0, 0, 0, 0, 0, 0},
-	{59, "VGA222", 0, 640, 480, 1, 0, 0, 0},
+	{59, "VGA222_640", 0, 640, 480, 1, 0, 0, 0},
 	{60, "VGA222_320", 0, 320, 240, 2, 0, 0, 0},
 	{61, "VGA222_720", 0, 720, 400, 1, 0, 0, 0},
 	{62, "VGA222_500", 0, 360, 200, 2, 0, 0, 0},
@@ -172,8 +172,8 @@ void DefineRegionSPI(int xstart, int ystart, int xend, int yend, int rw);
 void DrawBitmapSPI(int x1, int y1, int width, int height, int scale, int fc, int bc, unsigned char *bitmap);
 extern const int SPISpeeds[];
 extern void spi_write_command(unsigned char command);
-extern void I2C_Send_Data(unsigned char *data, int n);
-void I2C_Send_Command(char command);
+extern int I2C_Send_Data(unsigned char *data, int n, int update_global);
+extern int I2C_Send_Command(char command, int update_global);
 extern int mmI2Cvalue; // value of MM.I2C
 void waitwhilebusy(void);
 #if PICOMITERP2350
@@ -3382,9 +3382,9 @@ void N5110SetXY(int x, int y)
 void SSD1306I2CSetXY(uint8_t x, uint8_t y)
 {
 	uint8_t xn = x;
-	I2C_Send_Command(0xB0 | y);
-	I2C_Send_Command(0x10 | ((xn >> 4) & 0xF));
-	I2C_Send_Command(0x00 | (xn & 0xF));
+	I2C_Send_Command(0xB0 | y, 0);
+	I2C_Send_Command(0x10 | ((xn >> 4) & 0xF), 0);
+	I2C_Send_Command(0x00 | (xn & 0xF), 0);
 }
 void SSD1306SPISetXY(uint8_t x, uint8_t y)
 {
@@ -3418,10 +3418,22 @@ void ST7920SetXY(int x, int y)
 }
 #if PICOMITERP2350
 extern uint16_t __not_in_flash_func(RGB565)(uint32_t c);
+#if PICOMITERP2350
+// Place small lookup tables in RAM to avoid flash access on core1 during flash writes
+static const uint8_t __not_in_flash("rgb332_tables") RED_LUT_RAM[8] = {0, 4, 8, 12, 16, 20, 26, 31};
+static const uint8_t __not_in_flash("rgb332_tables") GREEN_LUT_RAM[8] = {0, 9, 18, 27, 36, 45, 54, 63};
+static const uint8_t __not_in_flash("rgb332_tables") BLUE_LUT_RAM[4] = {0, 10, 21, 31};
+static const uint8_t __not_in_flash("rgb332_tables") SCALE3_LUT_RAM[8] = {0, 36, 73, 109, 146, 182, 219, 255};
+static const uint8_t __not_in_flash("rgb332_tables") SCALE2_LUT_RAM[4] = {0, 85, 170, 255};
+#endif
 static uint32_t RGB332_LUT[256] = {0};
 static uint32_t remap_LUT[256] = {0};
 static uint8_t tlen = 2;
+#if PICOMITERP2350
+void __not_in_flash_func(init_RGB332_to_RGB565_LUT)(void)
+#else
 void init_RGB332_to_RGB565_LUT(void)
+#endif
 {
 	for (int i = 0; i < 256; i++)
 	{
@@ -3429,14 +3441,19 @@ void init_RGB332_to_RGB565_LUT(void)
 		uint8_t g = (i >> 2) & 0x07; // 3-bit green
 		uint8_t b = i & 0x03;		 // 2-bit blue
 
+#if PICOMITERP2350
+		uint8_t r5 = RED_LUT_RAM[r];
+		uint8_t g6 = GREEN_LUT_RAM[g];
+		uint8_t b5 = BLUE_LUT_RAM[b];
+#else
 		// Stretch components via perceptual LUTs
 		static const uint8_t RED_LUT[8] = {0, 4, 8, 12, 16, 20, 26, 31};
 		static const uint8_t GREEN_LUT[8] = {0, 9, 18, 27, 36, 45, 54, 63};
 		static const uint8_t BLUE_LUT[4] = {0, 10, 21, 31};
-
 		uint8_t r5 = RED_LUT[r];
 		uint8_t g6 = GREEN_LUT[g];
 		uint8_t b5 = BLUE_LUT[b];
+#endif
 
 		// Your bit order mapping:
 		if ((Option.DISPLAY_TYPE & 0xFC) != SSD1963_5_16BUFF)
@@ -3446,7 +3463,11 @@ void init_RGB332_to_RGB565_LUT(void)
 	}
 }
 
+#if PICOMITERP2350
+void __not_in_flash_func(init_RGB332_to_RGB888_LUT)(void)
+#else
 void init_RGB332_to_RGB888_LUT(void)
+#endif
 {
 	for (int i = 0; i < 256; ++i)
 	{
@@ -3454,39 +3475,67 @@ void init_RGB332_to_RGB888_LUT(void)
 		uint8_t g = (i >> 2) & 0x07; // 3 bits
 		uint8_t b = i & 0x03;		 // 2 bits
 
+#if PICOMITERP2350
 		uint8_t r8 = (r << 5) | (r << 2) | (r >> 1);	 // scale to 8 bits
 		uint8_t g8 = (g << 5) | (g << 2) | (g >> 1);	 // scale to 8 bits
 		uint8_t b8 = (b << 6) | (b << 4) | (b << 2) | b; // scale to 8 bits
+#else
+		uint8_t r8 = (r << 5) | (r << 2) | (r >> 1);	 // scale to 8 bits
+		uint8_t g8 = (g << 5) | (g << 2) | (g >> 1);	 // scale to 8 bits
+		uint8_t b8 = (b << 6) | (b << 4) | (b << 2) | b; // scale to 8 bits
+#endif
 
 		RGB332_LUT[i] = remap_LUT[i] = (b8 << 16) | (g8 << 8) | r8;
 	}
 	tlen = 3;
 }
 // Expand 3-bit to 8-bit using perceptual scaling
+#if PICOMITERP2350
+static inline uint8_t __not_in_flash_func(scale3to8)(uint8_t val)
+{
+	return SCALE3_LUT_RAM[val & 0x07];
+}
+#else
 static inline uint8_t scale3to8(uint8_t val)
 {
 	// Map 0–7 to perceptually spaced 0–255
 	static const uint8_t lut[8] = {0, 36, 73, 109, 146, 182, 219, 255};
 	return lut[val & 0x07];
 }
+#endif
 
 // Expand 2-bit to 8-bit using perceptual scaling
+#if PICOMITERP2350
+static inline uint8_t __not_in_flash_func(scale2to8)(uint8_t val)
+{
+	return SCALE2_LUT_RAM[val & 0x03];
+}
+#else
 static inline uint8_t scale2to8(uint8_t val)
 {
 	// Map 0–3 to perceptually spaced 0–255
 	static const uint8_t lut[4] = {0, 85, 170, 255};
 	return lut[val & 0x03];
 }
+#endif
 
 // Convert RGB332 to RGB888
+#if PICOMITERP2350
+void __not_in_flash_func(rgb332_to_rgb888)(uint8_t rgb332, uint8_t *r, uint8_t *g, uint8_t *b)
+#else
 void rgb332_to_rgb888(uint8_t rgb332, uint8_t *r, uint8_t *g, uint8_t *b)
+#endif
 {
 	*r = scale3to8((rgb332 >> 5) & 0x07); // Red: bits 7–5
 	*g = scale3to8((rgb332 >> 2) & 0x07); // Green: bits 4–2
 	*b = scale2to8(rgb332 & 0x03);		  // Blue: bits 1–0
 }
 
+#if PICOMITERP2350
+void __not_in_flash_func(init_RGB332_to_RGB888_LUT_SSD)(void)
+#else
 void init_RGB332_to_RGB888_LUT_SSD(void)
+#endif
 {
 	for (int i = 0; i < 256; ++i)
 	{
@@ -4061,7 +4110,7 @@ void Display_Refresh(void)
 		for (y = low_y / 8; y < (high_y & 0xf8) / 8 + 1; y++)
 		{
 			SSD1306I2CSetXY(Option.I2Coffset + low_x, y);
-			I2C_Send_Data(p + (y * DisplayHRes) + low_x, high_x - low_x + 1);
+			I2C_Send_Data(p + (y * DisplayHRes) + low_x, high_x - low_x + 1, 0);
 		}
 	}
 	else if (Option.DISPLAY_TYPE == SSD1306SPI)
@@ -4193,7 +4242,11 @@ void SPISpeedSet(int device)
 }
 
 // set the chip select for SPI to high (disabled)
+#if PICOMITERP2350
+void __not_in_flash_func(ClearCS)(int pin)
+#else
 void ClearCS(int pin)
+#endif
 {
 	if (pin)
 	{

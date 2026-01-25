@@ -38,6 +38,7 @@ OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
 #include "hardware/flash.h"
 #include "hardware/dma.h"
 #include "hardware/structs/watchdog.h"
+#include "re.h"
 #ifndef USBKEYBOARD
 #include "class/cdc/cdc_device.h"
 #endif
@@ -48,6 +49,10 @@ OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
 #include "Turtle.h"
 #endif
 #define overlap (VRes % (FontTable[gui_font >> 4][1] * (gui_font & 0b1111)) ? 0 : 1)
+
+/* Stride-aware array access macros for struct member arrays */
+#define STRIDE_FLOAT(ptr, idx, stride) (*(MMFLOAT *)((char *)(ptr) + (idx) * (stride)))
+#define STRIDE_INT(ptr, idx, stride) (*(long long int *)((char *)(ptr) + (idx) * (stride)))
 #include <math.h>
 void flist(int, int, int);
 // void clearprog(void);
@@ -103,6 +108,17 @@ int gosubindex;
 
 unsigned char g_DimUsed = false; // used to catch OPTION BASE after DIM has been used
 
+#ifdef STRUCTENABLED
+// Structure type definition table
+struct s_structdef *g_structtbl[MAX_STRUCT_TYPES]; // Array of pointers, allocated per-type
+int g_structcnt = 0;							   // Number of defined structure types
+int g_StructArg = -1;							   // Struct index for pending DIM AS structtype (-1 if none)
+int g_StructMemberType = 0;						   // Type of struct member being accessed (0 if not a member access)
+int g_StructMemberOffset = 0;					   // Offset of member within struct (for EXTRACT/INSERT/SORT)
+int g_StructMemberSize = 0;						   // Size of the member (for EXTRACT/INSERT/SORT)
+int g_ExprStructType = -1;						   // Struct type index from expression evaluation (-1 if not a struct)
+#endif
+
 int TraceOn; // used to track the state of TRON/TROFF
 unsigned char *TraceBuff[TRACE_BUFF_SIZE];
 int TraceBuffIndex;	 // used for listing the contents of the trace buffer
@@ -142,6 +158,10 @@ void MIPS16 __not_in_flash_func(cmd_inc)(void)
 		if (g_vartbl[g_VarIndex].type & T_CONST)
 			StandardError(22);
 		vtype = TypeMask(g_vartbl[g_VarIndex].type);
+#ifdef STRUCTENABLED
+		if (g_StructMemberType != 0)
+			vtype = TypeMask(g_StructMemberType);
+#endif
 		if (vtype & T_STR)
 			StandardError(6); // sanity check
 		if (vtype & T_NBR)
@@ -158,9 +178,17 @@ void MIPS16 __not_in_flash_func(cmd_inc)(void)
 		if (g_vartbl[g_VarIndex].type & T_CONST)
 			StandardError(22);
 		vtype = TypeMask(g_vartbl[g_VarIndex].type);
+#ifdef STRUCTENABLED
+		if (g_StructMemberType != 0)
+			vtype = TypeMask(g_StructMemberType);
+#endif
 		if (vtype & T_STR)
 		{
 			int size = g_vartbl[g_VarIndex].size;
+#ifdef STRUCTENABLED
+			if (g_StructMemberType & T_STR)
+				size = g_StructMemberSize;
+#endif
 			q = getstring(argv[2]);
 			if (*p + *q > size)
 				error("String too long");
@@ -465,6 +493,7 @@ void array_set(unsigned char *tp)
 	MMFLOAT *a1float = NULL;
 	int64_t *a1int = NULL;
 	unsigned char *a1str = NULL;
+	int s1; // stride for numeric arrays
 	getcsargs(&tp, 3);
 	if (!(argc == 3))
 		StandardError(2);
@@ -486,7 +515,7 @@ void array_set(unsigned char *tp)
 	}
 	else
 	{
-		card1 = parsenumberarray(argv[2], &a1float, &a1int, 2, 0, dims, true);
+		card1 = parsenumberarray(argv[2], &a1float, &a1int, 2, 0, dims, true, &s1);
 		if (t & T_STR)
 			SyntaxError();
 		;
@@ -494,12 +523,12 @@ void array_set(unsigned char *tp)
 		if (a1float != NULL)
 		{
 			for (i = 0; i < card1; i++)
-				*a1float++ = ((t & T_INT) ? (MMFLOAT)i64 : f);
+				STRIDE_FLOAT(a1float, i, s1) = ((t & T_INT) ? (MMFLOAT)i64 : f);
 		}
 		else
 		{
 			for (i = 0; i < card1; i++)
-				*a1int++ = ((t & T_INT) ? i64 : FloatToInt64(f));
+				STRIDE_INT(a1int, i, s1) = ((t & T_INT) ? i64 : FloatToInt64(f));
 		}
 	}
 }
@@ -522,6 +551,7 @@ void array_add(unsigned char *tp)
 	MMFLOAT *a1float = NULL, *a2float = NULL, scale;
 	int64_t *a1int = NULL, *a2int = NULL;
 	unsigned char *a1str = NULL, *a2str = NULL;
+	int s1, s2;
 	getcsargs(&tp, 5);
 	if (!(argc == 5))
 		StandardError(2);
@@ -556,13 +586,13 @@ void array_add(unsigned char *tp)
 	}
 	else
 	{
-		card1 = parsenumberarray(argv[0], &a1float, &a1int, 1, 0, dims, false);
+		card1 = parsenumberarray(argv[0], &a1float, &a1int, 1, 0, dims, false, &s1);
 		evaluate(argv[2], &f, &i64, &s, &t, false);
 		if (t & T_STR)
 			SyntaxError();
 		;
 		scale = getnumber(argv[2]);
-		card2 = parsenumberarray(argv[4], &a2float, &a2int, 3, 0, dims, true);
+		card2 = parsenumberarray(argv[4], &a2float, &a2int, 3, 0, dims, true, &s2);
 		if (card1 != card2)
 			StandardError(16);
 		if (scale != 0.0)
@@ -570,22 +600,22 @@ void array_add(unsigned char *tp)
 			if (a2float != NULL && a1float != NULL)
 			{
 				for (i = 0; i < card1; i++)
-					*a2float++ = ((t & T_INT) ? (MMFLOAT)i64 : f) + (*a1float++);
+					STRIDE_FLOAT(a2float, i, s2) = ((t & T_INT) ? (MMFLOAT)i64 : f) + STRIDE_FLOAT(a1float, i, s1);
 			}
 			else if (a2float != NULL && a1float == NULL)
 			{
 				for (i = 0; i < card1; i++)
-					(*a2float++) = ((t & T_INT) ? (MMFLOAT)i64 : f) + ((MMFLOAT)*a1int++);
+					STRIDE_FLOAT(a2float, i, s2) = ((t & T_INT) ? (MMFLOAT)i64 : f) + ((MMFLOAT)STRIDE_INT(a1int, i, s1));
 			}
 			else if (a2float == NULL && a1float != NULL)
 			{
 				for (i = 0; i < card1; i++)
-					(*a2int++) = FloatToInt64(((t & T_INT) ? i64 : FloatToInt64(f)) + (*a1float++));
+					STRIDE_INT(a2int, i, s2) = FloatToInt64(((t & T_INT) ? i64 : FloatToInt64(f)) + STRIDE_FLOAT(a1float, i, s1));
 			}
 			else
 			{
 				for (i = 0; i < card1; i++)
-					(*a2int++) = ((t & T_INT) ? i64 : FloatToInt64(f)) + (*a1int++);
+					STRIDE_INT(a2int, i, s2) = ((t & T_INT) ? i64 : FloatToInt64(f)) + STRIDE_INT(a1int, i, s1);
 			}
 		}
 		else
@@ -593,22 +623,22 @@ void array_add(unsigned char *tp)
 			if (a2float != NULL && a1float != NULL)
 			{
 				for (i = 0; i < card1; i++)
-					*a2float++ = *a1float++;
+					STRIDE_FLOAT(a2float, i, s2) = STRIDE_FLOAT(a1float, i, s1);
 			}
 			else if (a2float != NULL && a1float == NULL)
 			{
 				for (i = 0; i < card1; i++)
-					(*a2float++) = ((MMFLOAT)*a1int++);
+					STRIDE_FLOAT(a2float, i, s2) = ((MMFLOAT)STRIDE_INT(a1int, i, s1));
 			}
 			else if (a2float == NULL && a1float != NULL)
 			{
 				for (i = 0; i < card1; i++)
-					(*a2int++) = FloatToInt64(*a1float++);
+					STRIDE_INT(a2int, i, s2) = FloatToInt64(STRIDE_FLOAT(a1float, i, s1));
 			}
 			else
 			{
 				for (i = 0; i < card1; i++)
-					*a2int++ = *a1int++;
+					STRIDE_INT(a2int, i, s2) = STRIDE_INT(a1int, i, s1);
 			}
 		}
 	}
@@ -640,7 +670,7 @@ void array_insert(unsigned char *tp)
 	}
 	else
 	{
-		parsenumberarray(argv[0], &afloat, &a1int, 1, 0, dims, false);
+		parsenumberarray(argv[0], &afloat, &a1int, 1, 0, dims, false, NULL);
 		if (!a1int)
 			a1int = (int64_t *)afloat;
 	}
@@ -676,7 +706,7 @@ void array_insert(unsigned char *tp)
 	}
 	else
 	{
-		parsenumberarray(argv[i * 2 + 2], &afloat, &a2int, i + 1, 1, dims, true);
+		parsenumberarray(argv[i * 2 + 2], &afloat, &a2int, i + 1, 1, dims, true, NULL);
 		if (!a2int)
 			a2int = (int64_t *)afloat;
 	}
@@ -746,7 +776,7 @@ void array_slice(unsigned char *tp)
 	}
 	else
 	{
-		parsenumberarray(argv[0], &afloat, &a1int, 1, 0, dims, false);
+		parsenumberarray(argv[0], &afloat, &a1int, 1, 0, dims, false, NULL);
 		if (!a1int)
 			a1int = (int64_t *)afloat;
 	}
@@ -782,7 +812,7 @@ void array_slice(unsigned char *tp)
 	}
 	else
 	{
-		toarray = parsenumberarray(argv[i * 2 + 2], &afloat, &a2int, i + 1, 1, dims, true) - 1;
+		toarray = parsenumberarray(argv[i * 2 + 2], &afloat, &a2int, i + 1, 1, dims, true, NULL) - 1;
 		if (!a2int)
 			a2int = (int64_t *)afloat;
 	}
@@ -835,6 +865,7 @@ void MIPS16 __not_in_flash_func(cmd_let)(void)
 	long long int i64;
 	unsigned char *s;
 	unsigned char *p1, *p2;
+	int vartype; // effective type (may differ for struct members)
 
 	p1 = cmdline;
 	// search through the line looking for the equals sign
@@ -856,9 +887,28 @@ void MIPS16 __not_in_flash_func(cmd_let)(void)
 	if (g_vartbl[g_VarIndex].type & T_CONST)
 		StandardError(22);
 
+#ifdef STRUCTENABLED
+	// For struct member access, use the member type instead of the base variable type
+	if (g_StructMemberType != 0)
+	{
+		vartype = g_StructMemberType;
+		// For string members, use the size set by ResolveStructMember
+		if (vartype & T_STR)
+		{
+			size = g_StructMemberSize;
+		}
+	}
+	else
+	{
+		vartype = g_vartbl[g_VarIndex].type;
+	}
+#else
+	vartype = g_vartbl[g_VarIndex].type;
+#endif
+
 	// step over the equals sign, evaluate the rest of the command and save in the variable
 	p1++;
-	if (g_vartbl[g_VarIndex].type & T_STR)
+	if (vartype & T_STR)
 	{
 		t = T_STR;
 		p1 = evaluate(p1, &f, &i64, &s, &t, false);
@@ -866,7 +916,7 @@ void MIPS16 __not_in_flash_func(cmd_let)(void)
 			error("String too long");
 		Mstrcpy(p2, s);
 	}
-	else if (g_vartbl[g_VarIndex].type & T_NBR)
+	else if (vartype & T_NBR)
 	{
 		t = T_NBR;
 		p1 = evaluate(p1, &f, &i64, &s, &t, false);
@@ -875,6 +925,46 @@ void MIPS16 __not_in_flash_func(cmd_let)(void)
 		else
 			(*(MMFLOAT *)p2) = (MMFLOAT)i64;
 	}
+#ifdef STRUCTENABLED
+	else if (vartype & T_STRUCT)
+	{
+		// Struct assignment - evaluate the right side and copy struct data
+		// Save destination info BEFORE evaluate changes g_VarIndex
+		int dest_struct_idx = (int)g_vartbl[g_VarIndex].size;
+		int dest_struct_size = g_structtbl[dest_struct_idx]->total_size;
+
+		t = T_NOTYPE; // Let evaluate determine the actual type
+		p1 = evaluate(p1, &f, &i64, &s, &t, false);
+
+		// Check that RHS is a struct
+		if (!(t & T_STRUCT))
+		{
+			error("Expected a structure value");
+		}
+
+		// Validate struct types match (g_ExprStructType set by getvalue or function return)
+		if (g_ExprStructType >= 0 && g_ExprStructType != dest_struct_idx)
+		{
+			error("Structure types must match");
+		}
+
+		if (s != NULL)
+		{
+			if (dest_struct_idx >= 0 && dest_struct_idx < g_structcnt)
+			{
+				memcpy(p2, s, dest_struct_size);
+			}
+			else
+			{
+				error("Invalid struct type");
+			}
+		}
+		else
+		{
+			error("No struct value");
+		}
+	}
+#endif
 	else
 	{
 		t = T_INT;
@@ -1029,7 +1119,7 @@ void MIPS16 do_run(unsigned char *cmdline, bool CMM2mode)
 {
 	// RUN [ filename$ ] [, cmd_args$ ]
 	unsigned char *filename = (unsigned char *)"", *cmd_args = (unsigned char *)"";
-	unsigned char *cmdbuf = GetMemory(256);
+	unsigned char *cmdbuf = GetTempMemory(256);
 	memcpy(cmdbuf, cmdline, STRINGSIZE);
 	getcsargs(&cmdbuf, 3);
 	switch (argc)
@@ -1074,7 +1164,12 @@ void MIPS16 do_run(unsigned char *cmdline, bool CMM2mode)
 	}
 #endif
 	ClearRuntime(true);
-	PrepareProgram(true);
+	if (PrepareProgram(true))
+	{
+		// Error in program - print message and don't run
+		PrintPreprogramError();
+		return;
+	}
 	if (Option.DISPLAY_CONSOLE && (SPIREAD || Option.NoScroll))
 	{
 		ClearScreen(gui_bcolour);
@@ -1094,9 +1189,6 @@ void MIPS16 do_run(unsigned char *cmdline, bool CMM2mode)
 		return; // no program to run
 #ifdef PICOMITEWEB
 	cleanserver();
-#else
-	if (Option.DISPLAY_TYPE)
-		turtle_init(1);
 #endif
 #ifndef USBKEYBOARD
 	if (mouse0 == false && Option.MOUSE_CLOCK)
@@ -1151,12 +1243,16 @@ void MIPS16 cmd_list(void)
 		getcsargs(&p, 1);
 		if (argc)
 		{
-			j = (parseintegerarray(argv[0], &dest, 1, 1, NULL, true) - 1) * 8;
+			j = (parseintegerarray(argv[0], &dest, 1, 1, NULL, true, NULL) - 1) * 8;
 			dest[0] = 0;
 		}
 		for (int i = 0; i < MAXVARS; i++)
 		{
+#ifdef STRUCTENABLED
+			if (g_vartbl[i].type & (T_INT | T_STR | T_NBR | T_STRUCT))
+#else
 			if (g_vartbl[i].type & (T_INT | T_STR | T_NBR))
+#endif
 			{
 				count++;
 			}
@@ -1167,44 +1263,89 @@ void MIPS16 cmd_list(void)
 		for (int i = 0, j = 0; i < MAXVARS; i++)
 		{
 			char out[MAXVARLEN + 30];
+#ifdef STRUCTENABLED
+			if (g_vartbl[i].type & (T_INT | T_STR | T_NBR | T_STRUCT))
+#else
 			if (g_vartbl[i].type & (T_INT | T_STR | T_NBR))
+#endif
 			{
 				if (g_vartbl[i].level == 0)
 					strcpy(out, "DIM ");
 				else
 					strcpy(out, "LOCAL ");
-				if (!(g_vartbl[i].type & T_EXPLICIT))
+#ifdef STRUCTENABLED
+				// Handle structure types
+				if (g_vartbl[i].type & T_STRUCT)
+				{
+					// size field holds struct index
+					int struct_idx = (int)g_vartbl[i].size;
+					if (struct_idx >= 0 && struct_idx < g_structcnt)
+					{
+						strcat(out, (char *)g_vartbl[i].name);
+						// Array dimensions for structs
+						if (g_vartbl[i].dims[0] > 0)
+						{
+							strcat(out, "(");
+							for (int k = 0; k < MAXDIM; k++)
+							{
+								if (g_vartbl[i].dims[k] > 0)
+								{
+									char s[20];
+									IntToStr(s, (int64_t)g_vartbl[i].dims[k], 10);
+									strcat(out, s);
+								}
+								if (k < MAXDIM - 1 && g_vartbl[i].dims[k + 1] > 0)
+									strcat(out, ",");
+							}
+							strcat(out, ")");
+						}
+						strcat(out, " AS ");
+						strcat(out, (char *)g_structtbl[struct_idx]->name);
+					}
+					else
+					{
+						strcat(out, (char *)g_vartbl[i].name);
+						strcat(out, " AS <invalid>");
+					}
+					// Skip to c[j] assignment for struct types
+					c[j] = (char *)((int)c + sizeof(char *) * count + j * (MAXVARLEN + 30));
+					strcpy(c[j], out);
+					j++;
+					continue;
+				}
+#endif
+				if (!(g_vartbl[i].namelen & NAMELEN_EXPLICIT))
 				{
 					if (g_vartbl[i].type & T_INT)
 					{
-						if (!(g_vartbl[i].type & T_EXPLICIT))
+						if (!(g_vartbl[i].namelen & NAMELEN_EXPLICIT))
 							strcat(out, "INTEGER ");
 					}
 					if (g_vartbl[i].type & T_STR)
 					{
-						if (!(g_vartbl[i].type & T_EXPLICIT))
+						if (!(g_vartbl[i].namelen & NAMELEN_EXPLICIT))
 							strcat(out, "STRING ");
 					}
 					if (g_vartbl[i].type & T_NBR)
 					{
-						if (!(g_vartbl[i].type & T_EXPLICIT))
+						if (!(g_vartbl[i].namelen & NAMELEN_EXPLICIT))
 							strcat(out, "FLOAT ");
 					}
 				}
 				strcat(out, (char *)g_vartbl[i].name);
 				if (g_vartbl[i].type & T_INT)
 				{
-					if (g_vartbl[i].type & T_EXPLICIT)
+					if (g_vartbl[i].namelen & NAMELEN_EXPLICIT)
 						strcat(out, "%");
 				}
 				if (g_vartbl[i].type & T_STR)
 				{
-					if (g_vartbl[i].type & T_EXPLICIT)
+					if (g_vartbl[i].namelen & NAMELEN_EXPLICIT)
 						strcat(out, "$");
 				}
 				if (g_vartbl[i].type & T_NBR)
 				{
-					if (g_vartbl[i].type & T_EXPLICIT)
+					if (g_vartbl[i].namelen & NAMELEN_EXPLICIT)
 						strcat(out, "!");
 				}
 				if (g_vartbl[i].dims[0] > 0)
@@ -1257,6 +1398,112 @@ void MIPS16 cmd_list(void)
 			dest[0] = ol;
 		}
 	}
+#ifdef STRUCTENABLED
+	else if ((p = checkstring(cmdline, (unsigned char *)"TYPE")))
+	{
+		// LIST TYPE [typename] - Display structure type definitions
+		int i, j;
+		unsigned char typename[MAXVARLEN + 1];
+		int found = -1;
+
+		skipspace(p);
+
+		if (*p && *p != '\'')
+		{
+			// Specific type name provided
+			int namelen = 0;
+			while (isnamechar(*p) && namelen < MAXVARLEN)
+			{
+				typename[namelen++] = mytoupper(*p++);
+			}
+			typename[namelen] = 0;
+
+			// Find the type
+			for (i = 0; i < g_structcnt; i++)
+			{
+				if (strcmp((char *)typename, (char *)g_structtbl[i]->name) == 0)
+				{
+					found = i;
+					break;
+				}
+			}
+			if (found < 0)
+				error("TYPE not found");
+		}
+
+		if (g_structcnt == 0)
+		{
+			MMPrintString("No structure types defined\r\n");
+			return;
+		}
+
+		// Print structure(s)
+		for (i = 0; i < g_structcnt; i++)
+		{
+			if (found >= 0 && i != found)
+				continue;
+
+			struct s_structdef *sd = g_structtbl[i];
+			char buf[128];
+
+			MMPrintString("TYPE ");
+			MMPrintString((char *)sd->name);
+			MMPrintString("\r\n");
+
+			for (j = 0; j < sd->num_members; j++)
+			{
+				struct s_structmember *sm = &sd->members[j];
+				char typestr[48];
+				char dimstr[64] = "";
+
+				// Build dimension string if array
+				if (sm->dims[0] != 0)
+				{
+					strcpy(dimstr, "(");
+					for (int d = 0; d < MAXDIM && sm->dims[d] != 0; d++)
+					{
+						if (d > 0)
+							strcat(dimstr, ",");
+						char numbuf[16];
+						sprintf(numbuf, "%d", sm->dims[d]);
+						strcat(dimstr, numbuf);
+					}
+					strcat(dimstr, ")");
+				}
+
+				if (sm->type & T_INT)
+					strcpy(typestr, "INTEGER");
+				else if (sm->type & T_NBR)
+					strcpy(typestr, "FLOAT");
+				else if (sm->type & T_STR)
+				{
+					sprintf(typestr, "STRING LENGTH %d", sm->size);
+				}
+				else if (sm->type & T_STRUCT)
+				{
+					// Show nested structure type name
+					if (sm->size >= 0 && sm->size < g_structcnt)
+						strcpy(typestr, (char *)g_structtbl[sm->size]->name);
+					else
+						strcpy(typestr, "(INVALID STRUCT)");
+				}
+				else
+					strcpy(typestr, "?");
+
+				MMPrintString("    ");
+				MMPrintString((char *)sm->name);
+				MMPrintString(dimstr);
+				MMPrintString(" AS ");
+				MMPrintString(typestr);
+				sprintf(buf, "  ' offset=%d\r\n", sm->offset);
+				MMPrintString(buf);
+			}
+
+			sprintf(buf, "END TYPE  ' size=%d bytes\r\n\r\n", sd->total_size);
+			MMPrintString(buf);
+		}
+	}
+#endif
 	else if ((p = checkstring(cmdline, (unsigned char *)"PINS")))
 	{
 #if defined(PICOMITEWEB) && defined(rp2350)
@@ -2209,7 +2456,13 @@ void MIPS16 do_chain(unsigned char *cmdline)
 	if (*buf && !FileLoadProgram(buf, true))
 		return;
 	ClearRuntime(false);
-	PrepareProgram(true);
+	if (PrepareProgram(true))
+	{
+		// Error in program - print message and don't run
+		RestoreContext(false);
+		PrintPreprogramError();
+		return;
+	}
 	RestoreContext(false);
 	if (Option.DISPLAY_CONSOLE && (SPIREAD || Option.NoScroll))
 	{
@@ -2261,7 +2514,10 @@ void cmd_select(void)
 	if (type & T_INT)
 		i64 = *(long long int *)v;
 	if (type & T_STR)
+	{
 		Mstrcpy((unsigned char *)s, (unsigned char *)v);
+		ClearSpecificTempMemory(v); // free temp memory now that value is copied
+	}
 
 	// now search through the program looking for a matching CASE statement
 	// i tracks the nesting level of any nested SELECT CASE commands
@@ -2340,6 +2596,11 @@ void cmd_select(void)
 					p = evaluate(p, &ftt, &i64tt, &stt, &t, false); // evaluate the right hand side of the TO expression
 					if (((type & T_NBR) && f >= ft && f <= ftt) || ((type & T_INT) && i64 >= i64t && i64 <= i64tt) || (((type & T_STR) && Mstrcmp(s, st) >= 0) && (Mstrcmp(s, stt) <= 0)))
 					{
+						if (type & T_STR)
+						{
+							ClearSpecificTempMemory(st);
+							ClearSpecificTempMemory(stt);
+						}
 						skipelement(p);
 						nextstmt = p;
 						CurrentLinePtr = SaveCurrentLinePtr;
@@ -2348,6 +2609,11 @@ void cmd_select(void)
 					else
 					{
 						skipspace(p);
+						if (type & T_STR)
+						{
+							ClearSpecificTempMemory(st);
+							ClearSpecificTempMemory(stt);
+						}
 						continue; // otherwise continue searching
 					}
 				}
@@ -2355,11 +2621,15 @@ void cmd_select(void)
 				// if we got to here the element must be just a single match.  So make the test
 				if (((type & T_NBR) && f == ft) || ((type & T_INT) && i64 == i64t) || ((type & T_STR) && Mstrcmp(s, st) == 0))
 				{
+					if (type & T_STR)
+						ClearSpecificTempMemory(st);
 					skipelement(p);
 					nextstmt = p;
 					CurrentLinePtr = SaveCurrentLinePtr;
 					return; // if we have a match just return to the interpreter and let it execute the code
 				}
+				if (type & T_STR)
+					ClearSpecificTempMemory(st);
 				skipspace(p);
 			} while (*p == ','); // keep looping through the elements on the CASE line
 			checkend(p);
@@ -2495,14 +2765,24 @@ void cmd_input(void)
 		tp = findvar(argv[i], V_FIND); // get the variable and save its new value
 		if (g_vartbl[g_VarIndex].type & T_CONST)
 			StandardError(22);
-		if (g_vartbl[g_VarIndex].type & T_STR)
+		int inp_vtype = g_vartbl[g_VarIndex].type;
+		int inp_size = g_vartbl[g_VarIndex].size;
+#ifdef STRUCTENABLED
+		if (g_StructMemberType != 0)
 		{
-			if (strlen((char *)s) > g_vartbl[g_VarIndex].size)
+			inp_vtype = g_StructMemberType;
+			if (g_StructMemberType & T_STR)
+				inp_size = g_StructMemberSize;
+		}
+#endif
+		if (inp_vtype & T_STR)
+		{
+			if (strlen((char *)s) > inp_size)
 				error("String too long");
 			strcpy((char *)tp, (char *)s);
 			CtoM(tp); // convert to a MMBasic string
 		}
-		else if (g_vartbl[g_VarIndex].type & T_INT)
+		else if (inp_vtype & T_INT)
 		{
 			*((long long int *)tp) = strtoll((char *)s, (char **)&sp, 10); // convert to an integer
 		}
@@ -2640,6 +2920,10 @@ void MIPS32 __not_in_flash_func(cmd_for)(void)
 		if (g_vartbl[g_VarIndex].type & T_CONST)
 			StandardError(22);
 		vtype = TypeMask(g_vartbl[g_VarIndex].type);
+#ifdef STRUCTENABLED
+		if (g_StructMemberType != 0)
+			vtype = TypeMask(g_StructMemberType);
+#endif
 		if (vtype & T_STR)
 			StandardError(6); // sanity check
 
@@ -2845,7 +3129,7 @@ breakout:
 	}
 }
 
-#if WEBRP2350
+#if LOWRAM
 void cmd_do(void)
 {
 #else
@@ -3128,13 +3412,23 @@ void cmd_gosub(void)
 void cmd_mid(void)
 {
 	unsigned char *p;
+	int mid_vtype;
 	getcsargs(&cmdline, 5);
 	findvar(argv[0], V_NOFIND_ERR);
 	if (g_vartbl[g_VarIndex].type & T_CONST)
 		StandardError(22);
-	if (!(g_vartbl[g_VarIndex].type & T_STR))
-		error("Not a string");
+	mid_vtype = g_vartbl[g_VarIndex].type;
 	int size = g_vartbl[g_VarIndex].size;
+#ifdef STRUCTENABLED
+	if (g_StructMemberType != 0)
+	{
+		mid_vtype = g_StructMemberType;
+		if (g_StructMemberType & T_STR)
+			size = g_StructMemberSize;
+	}
+#endif
+	if (!(mid_vtype & T_STR))
+		error("Not a string");
 	char *sourcestring = (char *)getstring(argv[0]);
 	int start = getint(argv[2], 1, sourcestring[0]);
 	int num = -1;
@@ -3169,11 +3463,17 @@ void cmd_mid(void)
 }
 void cmd_byte(void)
 {
+	int byte_vtype;
 	getcsargs(&cmdline, 3);
 	findvar(argv[0], V_NOFIND_ERR);
 	if (g_vartbl[g_VarIndex].type & T_CONST)
 		StandardError(22);
-	if (!(g_vartbl[g_VarIndex].type & T_STR))
+	byte_vtype = g_vartbl[g_VarIndex].type;
+#ifdef STRUCTENABLED
+	if (g_StructMemberType != 0)
+		byte_vtype = g_StructMemberType;
+#endif
+	if (!(byte_vtype & T_STR))
 		error("Not a string");
 	unsigned char *sourcestring = (unsigned char *)getstring(argv[0]);
 	int start = getint(argv[2], 1, sourcestring[0]);
@@ -3191,11 +3491,17 @@ void cmd_byte(void)
 }
 void cmd_bit(void)
 {
+	int bit_vtype;
 	getcsargs(&cmdline, 3);
 	uint64_t *source = (uint64_t *)findvar(argv[0], V_NOFIND_ERR);
 	if (g_vartbl[g_VarIndex].type & T_CONST)
 		StandardError(22);
-	if (!(g_vartbl[g_VarIndex].type & T_INT))
+	bit_vtype = g_vartbl[g_VarIndex].type;
+#ifdef STRUCTENABLED
+	if (g_StructMemberType != 0)
+		bit_vtype = g_StructMemberType;
+#endif
+	if (!(bit_vtype & T_INT))
 		error("Not an integer");
 	uint64_t bit = (uint64_t)1 << (uint64_t)getint(argv[2], 0, 63);
 	while (*cmdline && tokenfunction(*cmdline) != op_equal)
@@ -3627,17 +3933,40 @@ void parse_and_strip(char *string, short *dims)
 
 	if (open && close && close > open)
 	{
-		// Parse numbers inside parentheses
+		// Parse dimension expressions inside parentheses
 		char buffer[256];
 		strncpy(buffer, open + 1, close - open - 1);
 		buffer[close - open - 1] = '\0';
 
-		char *token = strtok(buffer, ",");
+		// Parse comma-separated expressions directly using getinteger
+		// This evaluates BASIC expressions like variables
+		unsigned char *p = (unsigned char *)buffer;
 		int idx = 0;
-		while (token && idx < MAXDIM)
+		while (*p && idx < MAXDIM)
 		{
-			dims[idx++] = atoi(token);
-			token = strtok(NULL, ",");
+			skipspace(p);
+			if (*p == 0)
+				break;
+			// Find end of this expression (comma or end of string)
+			unsigned char *start = p;
+			int paren_depth = 0;
+			while (*p && !(*p == ',' && paren_depth == 0))
+			{
+				if (*p == '(')
+					paren_depth++;
+				else if (*p == ')')
+					paren_depth--;
+				p++;
+			}
+			// Temporarily terminate this expression
+			unsigned char saved = *p;
+			*p = 0;
+			// Evaluate the expression
+			dims[idx++] = getinteger(start);
+			// Restore and skip comma
+			*p = saved;
+			if (*p == ',')
+				p++;
 		}
 
 		// Replace with name()
@@ -3694,6 +4023,9 @@ void cmd_redim(void)
 	uint8_t *oldmemory = NULL, *newmemory;
 	int oldsize = 0, newsize = 0;
 	int length = -1;
+#ifdef STRUCTENABLED
+	int structIdx = -1;
+#endif
 	unsigned char *tp;
 	unsigned char old[MAXVARLEN + 1];
 	int preserve = ((tp = checkstring(cmdline, (unsigned char *)"PRESERVE")) ? 1 : 0);
@@ -3708,6 +4040,10 @@ void cmd_redim(void)
 			findvar(old, V_FIND | V_NOFIND_ERR | V_EMPTY_OK);
 			if (g_vartbl[g_VarIndex].type & T_STR)
 				length = g_vartbl[g_VarIndex].size;
+#ifdef STRUCTENABLED
+			if (g_vartbl[g_VarIndex].type & T_STRUCT)
+				structIdx = (int)g_vartbl[g_VarIndex].size; // Save struct type index
+#endif
 			if (!g_vartbl[g_VarIndex].dims[0])
 				error("$ is not an array ", argv[i]);
 			int type = TypeMask(g_vartbl[g_VarIndex].type);
@@ -3731,6 +4067,22 @@ void cmd_redim(void)
 				IntToStr((char *)&newstring[strlen((char *)newstring)], length, 10);
 				findvar(newstring, type | V_FIND | V_DIM_VAR);
 			}
+#ifdef STRUCTENABLED
+			else if (type & T_STRUCT)
+			{
+				// Strip "AS structtype" from the argument - find and terminate at AS token
+				unsigned char *vararg = GetTempStrMemory();
+				strcpy((char *)vararg, (char *)argv[i]);
+				unsigned char *asp = skipvar(vararg, false);
+				while (*asp && *asp != tokenAS)
+					asp++;
+				if (*asp == tokenAS)
+					*asp = 0;			 // Terminate string before AS
+				g_StructArg = structIdx; // Set struct type for findvar
+				findvar(vararg, type | T_IMPLIED | V_FIND | V_DIM_VAR);
+				g_StructArg = -1; // Reset
+			}
+#endif
 			else
 				findvar(argv[i], type | V_FIND | V_DIM_VAR);
 			newmemory = g_vartbl[g_VarIndex].val.s;
@@ -3864,8 +4216,21 @@ void MIPS16 cmd_read(void)
 					ptr += g_vartbl[g_VarIndex].size + 1;
 				vtbl[vcnt] = (char *)ptr;
 			}
+#ifdef STRUCTENABLED
+			if (g_StructMemberType != 0)
+			{
+				vtype[vcnt] = TypeMask(g_StructMemberType);
+				vsize[vcnt] = (g_StructMemberType & T_STR) ? g_StructMemberSize : g_vartbl[g_VarIndex].size;
+			}
+			else
+			{
+				vtype[vcnt] = TypeMask(g_vartbl[g_VarIndex].type);
+				vsize[vcnt] = g_vartbl[g_VarIndex].size;
+			}
+#else
 			vtype[vcnt] = TypeMask(g_vartbl[g_VarIndex].type);
 			vsize[vcnt] = g_vartbl[g_VarIndex].size;
+#endif
 			vcnt++;
 		}
 	}
@@ -4165,10 +4530,20 @@ void cmd_lineinput(void)
 	vp = findvar(argv[i], V_FIND);
 	if (g_vartbl[g_VarIndex].type & T_CONST)
 		StandardError(22);
-	if (!(g_vartbl[g_VarIndex].type & T_STR))
+	int linp_vtype = g_vartbl[g_VarIndex].type;
+	int linp_size = g_vartbl[g_VarIndex].size;
+#ifdef STRUCTENABLED
+	if (g_StructMemberType != 0)
+	{
+		linp_vtype = g_StructMemberType;
+		if (g_StructMemberType & T_STR)
+			linp_size = g_StructMemberSize;
+	}
+#endif
+	if (!(linp_vtype & T_STR))
 		StandardError(6);
 	MMgetline(fnbr, (char *)inpbuf); // get the input line
-	if (strlen((char *)inpbuf) > g_vartbl[g_VarIndex].size)
+	if (strlen((char *)inpbuf) > linp_size)
 		error("String too long");
 	strcpy((char *)vp, (char *)inpbuf);
 	CtoM(vp); // convert to a MMBasic string
@@ -4312,9 +4687,14 @@ void cmd_on(void)
  */
 // utility routine used by DoDim() below and other places in the interpreter
 // checks if the type has been explicitly specified as in DIM FLOAT A, B, ... etc
+// For structures, sets g_StructArg to the structure index
 unsigned char *CheckIfTypeSpecified(unsigned char *p, int *type, int AllowDefaultType)
 {
 	unsigned char *tp;
+
+#ifdef STRUCTENABLED
+	g_StructArg = -1; // Reset struct index
+#endif
 
 	if ((tp = checkstring(p, (unsigned char *)"INTEGER")) != NULL)
 		*type = T_INT | T_IMPLIED;
@@ -4322,6 +4702,31 @@ unsigned char *CheckIfTypeSpecified(unsigned char *p, int *type, int AllowDefaul
 		*type = T_STR | T_IMPLIED;
 	else if ((tp = checkstring(p, (unsigned char *)"FLOAT")) != NULL)
 		*type = T_NBR | T_IMPLIED;
+#ifdef STRUCTENABLED
+	else
+	{
+		// Check if it's a structure type name
+		skipspace(p); // Skip any leading whitespace before type name
+		int structidx = FindStructType(p);
+		if (structidx >= 0)
+		{
+			*type = T_STRUCT | T_IMPLIED;
+			g_StructArg = structidx; // Store struct index in global
+			// Advance past the type name
+			tp = p;
+			while (isnamechar(*tp))
+				tp++;
+			skipspace(tp);
+		}
+		else
+		{
+			if (!AllowDefaultType)
+				error("Variable type");
+			tp = p;
+			*type = DefaultType; // if the type is not specified use the default
+		}
+	}
+#else
 	else
 	{
 		if (!AllowDefaultType)
@@ -4329,6 +4734,7 @@ unsigned char *CheckIfTypeSpecified(unsigned char *p, int *type, int AllowDefaul
 		tp = p;
 		*type = DefaultType; // if the type is not specified use the default
 	}
+#endif
 	return tp;
 }
 
@@ -4399,6 +4805,7 @@ void MIPS16 cmd_dim(void)
 				if (ImpliedType & T_IMPLIED)
 					error("Type specified twice");
 				p++;									  // step over the AS token
+				skipspace(p);							  // skip any whitespace after AS
 				p = CheckIfTypeSpecified(p, &type, true); // and get the type
 				if (!(type & T_IMPLIED))
 					error("Variable type");
@@ -4426,9 +4833,9 @@ void MIPS16 cmd_dim(void)
 						VarName[k] = 0; // terminate the string on a non valid char
 						break;
 					}
-				strcat((char *)VarName, ".");
+				strcat((char *)VarName, "\x1e");		  // use 0x1E (record separator) to avoid conflict with struct member syntax
 				strcat((char *)VarName, (char *)argv[i]); // by prefixing the var name with the sub/fun name
-				StaticVar = true;
+				StaticVar = NAMELEN_STATIC;				  // flag for marking the variable as static
 			}
 			else
 				strcpy((char *)VarName, (char *)argv[i]);
@@ -4441,6 +4848,9 @@ void MIPS16 cmd_dim(void)
 				v = findvar(VarName, type | V_FIND | V_DIM_VAR); // create the variable
 				type = TypeMask(g_vartbl[g_VarIndex].type);
 				VIndexSave = g_VarIndex;
+				// Mark static variables with NAMELEN_STATIC so struct member lookup skips them
+				if (StaticVar)
+					g_vartbl[VIndexSave].namelen |= NAMELEN_STATIC;
 				*chPosit = chSave; // restore the char previously removed
 				if (g_vartbl[g_VarIndex].dims[0] == -1)
 					error("Array dimensions");
@@ -4455,7 +4865,95 @@ void MIPS16 cmd_dim(void)
 				{
 					p++; // step over the equals sign
 					skipspace(p);
-					if (g_vartbl[g_VarIndex].dims[0] > 0 && *p == '(')
+#ifdef STRUCTENABLED
+					// Handle struct initialization: DIM var AS StructType = (val1, val2, ...)
+					if (g_vartbl[g_VarIndex].type & T_STRUCT)
+					{
+						if (*p != '(')
+							error("Expected '(' for structure initialisation");
+
+						int struct_idx = (int)g_vartbl[VIndexSave].size;
+						struct s_structdef *sd = g_structtbl[struct_idx];
+						int struct_size = sd->total_size;
+						unsigned char *struct_ptr = (unsigned char *)v;
+
+						// Calculate number of struct elements (1 for simple, more for array)
+						int num_elements = 1;
+						if (g_vartbl[VIndexSave].dims[0] > 0)
+						{
+							for (j = 1, k = 0; k < MAXDIM && g_vartbl[VIndexSave].dims[k]; k++)
+							{
+								num_elements *= (g_vartbl[VIndexSave].dims[k] + 1 - g_OptionBase);
+							}
+						}
+
+						p++; // step over opening '('
+						skipspace(p);
+
+						// Process each struct element
+						for (int elem = 0; elem < num_elements; elem++)
+						{
+							// Process each member of the struct
+							for (int m = 0; m < sd->num_members; m++)
+							{
+								struct s_structmember *member = &sd->members[m];
+								unsigned char *member_ptr = struct_ptr + member->offset;
+
+								// Calculate number of array elements for this member (1 if not array)
+								int member_elements = 1;
+								if (member->dims[0] != 0)
+								{
+									for (k = 0; k < MAXDIM && member->dims[k]; k++)
+									{
+										member_elements *= (member->dims[k] + 1 - g_OptionBase);
+									}
+								}
+
+								// Process each element of member array (or just 1 if not array)
+								for (int me = 0; me < member_elements; me++)
+								{
+									skipspace(p);
+									if (*p == ')' || *p == 0)
+										error("Not enough initialisation values");
+
+									// Determine member size for pointer advancement
+									int elem_size = 0;
+									if (member->type & T_STR)
+										elem_size = member->size + 1;
+									else if (member->type & T_NBR)
+										elem_size = sizeof(MMFLOAT);
+									else if (member->type & T_INT)
+										elem_size = sizeof(long long int);
+									else
+										error("Unsupported member type in initialisation");
+
+									// Use SetValue to parse and assign the value
+									p = SetValue(p, member->type, member_ptr);
+									member_ptr += elem_size;
+
+									skipspace(p);
+									// Check for comma (more values) or closing paren
+									if (*p == ',')
+									{
+										p++; // skip comma
+									}
+									else if (*p != ')')
+									{
+										error("Expected ',' or ')' in structure initialisation");
+									}
+								}
+							}
+							// Move to next struct element in array
+							struct_ptr += struct_size;
+						}
+
+						skipspace(p);
+						if (*p != ')')
+							error("Expected ')' at end of structure initialisation");
+					}
+					else
+#endif
+						if (g_vartbl[g_VarIndex].dims[0] > 0 && *p == '(')
 					{
 						// calculate the overall size of the array
 						for (j = 1, k = 0; k < MAXDIM && g_vartbl[VIndexSave].dims[k]; k++)
@@ -4498,7 +4996,7 @@ void MIPS16 cmd_dim(void)
 				if (tv != NULL)
 					error("$ already declared", argv[i]);
 				tv = findvar(argv[i], typeSave | V_LOCAL | V_FIND | V_DIM_VAR); // create the variable
-				if (g_vartbl[VIndexSave].dims[0] > 0 || (g_vartbl[VIndexSave].type & T_STR))
+				if (g_vartbl[VIndexSave].dims[0] > 0 || (g_vartbl[VIndexSave].type & (T_STR | T_STRUCT)))
 				{
 					FreeMemorySafe((void **)&tv);							 // we don't need the memory allocated to the local
 					g_vartbl[g_VarIndex].val.s = g_vartbl[VIndexSave].val.s; // point to the memory of the global variable
@@ -4562,6 +5060,1750 @@ void cmd_const(void)
 		}
 	}
 }
+
+#ifdef STRUCTENABLED
+// TYPE typename - At runtime, just skip to END TYPE (like SUB/FUN)
+// Structure definition is processed in PrepareProgramExt
+#ifdef rp2350
+void cmd_type(void)
+#else
+void MIPS16 cmd_type(void)
+#endif
+{
+	unsigned char *p;
+
+	// At runtime, we just skip past the TYPE block
+	// The structure definition was already built during PrepareProgram
+	p = nextstmt;
+	while (1)
+	{
+		p = GetNextCommand(p, NULL, (unsigned char *)"No matching END TYPE");
+		CommandToken tkn = commandtbl_decode(p);
+		if (tkn == cmdTYPE)
+			error("Nested TYPE not allowed");
+		if (tkn == cmdEND_TYPE)
+		{
+			skipelement(p);
+			nextstmt = p;
+			break;
+		}
+	}
+}
+
+// END TYPE - should never be executed directly (only reached via cmd_type skip)
+#ifdef rp2350
+void cmd_endtype(void)
+#else
+void MIPS16 cmd_endtype(void)
+#endif
+{
+	error("END TYPE without TYPE");
+}
+
+// STRUCT command - operations on structure variables
+// Syntax:
+//   STRUCT COPY source TO destination
+//   STRUCT COPY source() TO destination()  - copy entire array
+//   (future: STRUCT PRINT var, STRUCT CLEAR var, etc.)
+#ifdef rp2350
+void cmd_struct(void)
+#else
+void MIPS16 cmd_struct(void)
+#endif
+{
+	unsigned char *p;
+
+	if ((p = checkstring(cmdline, (unsigned char *)"COPY")) != NULL)
+	{
+		// STRUCT COPY source TO destination
+		// STRUCT COPY source() TO destination()  - copy entire array
+		unsigned char *src_ptr, *dst_ptr;
+		int src_idx, dst_idx, src_struct_type, dst_struct_type;
+		unsigned char *tp;
+		int src_is_array = 0, dst_is_array = 0;
+		int src_num_elements = 1, dst_num_elements = 1;
+
+		skipspace(p);
+
+		// Get source variable - V_EMPTY_OK allows empty () for arrays
+		src_ptr = findvar(p, V_FIND | V_NOFIND_ERR | V_EMPTY_OK);
+		src_idx = g_VarIndex;
+
+		// Check source is a struct (not a member access)
+		if (!(g_vartbl[src_idx].type & T_STRUCT))
+			error("Source must be a structure variable");
+
+		// For struct arrays, the pointer returned is to the specific element
+		// but we need to verify this is a whole struct, not a member
+		if (g_StructMemberType != 0)
+			error("Cannot copy structure member, use whole structure");
+
+		src_struct_type = (int)g_vartbl[src_idx].size; // struct type index stored in size field
+
+		// Check if source is an array with empty parentheses (whole array copy)
+		// V_EMPTY_OK returns base pointer when () is empty
+		if (g_vartbl[src_idx].dims[0] != 0)
+		{
+			// It's an array - check if empty parentheses were used
+			unsigned char *paren = (unsigned char *)strchr((char *)p, '(');
+			if (paren)
+			{
+				paren++;
+				skipspace(paren);
+				if (*paren == ')')
+				{
+					// Empty parentheses - whole array copy
+					src_is_array = 1;
+					for (int d = 0; d < MAXDIM && g_vartbl[src_idx].dims[d] != 0; d++)
+					{
+						src_num_elements *= (g_vartbl[src_idx].dims[d] + 1 - g_OptionBase);
+					}
+				}
+			}
+		}
+
+		// Skip past the source variable to find TO
+		tp = skipvar(p, false);
+		skipspace(tp);
+
+		// Check for TO keyword (tokenized)
+		if (*tp != tokenTO)
+			error("Expected TO");
+		tp++; // skip TO token
+		skipspace(tp);
+
+		// Get destination variable
+		dst_ptr = findvar(tp, V_FIND | V_NOFIND_ERR | V_EMPTY_OK);
+		dst_idx = g_VarIndex;
+
+		// Check destination is a struct
+		if (!(g_vartbl[dst_idx].type & T_STRUCT))
+			error("Destination must be a structure variable");
+
+		if (g_StructMemberType != 0)
+			error("Cannot copy to structure member, use whole structure");
+
+		dst_struct_type = (int)g_vartbl[dst_idx].size;
+
+		// Check if destination is an array with empty parentheses
+		if (g_vartbl[dst_idx].dims[0] != 0)
+		{
+			unsigned char *paren = (unsigned char *)strchr((char *)tp, '(');
+			if (paren)
+			{
+				paren++;
+				skipspace(paren);
+				if (*paren == ')')
+				{
+					dst_is_array = 1;
+					for (int d = 0; d < MAXDIM && g_vartbl[dst_idx].dims[d] != 0; d++)
+					{
+						dst_num_elements *= (g_vartbl[dst_idx].dims[d] + 1 - g_OptionBase);
+					}
+				}
+			}
+		}
+
+		// Validate same struct type
+		if (src_struct_type != dst_struct_type)
+			error("Structure types must match");
+
+		// Validate array copy consistency
+		if (src_is_array != dst_is_array)
+			error("Both source and destination must be arrays or both must be single structs");
+
+		// For array copy, destination must be at least as large as source
+		if (src_is_array && dst_num_elements < src_num_elements)
+			error("Destination array too small");
+
+		// Perform the copy
+		int struct_size = g_structtbl[src_struct_type]->total_size;
+		int copy_size = struct_size * src_num_elements;
+		memcpy(dst_ptr, src_ptr, copy_size);
+	}
+	else if ((p = checkstring(cmdline, (unsigned char *)"SORT")) != NULL)
+	{
+		// STRUCT SORT array().membername [, flags]
+		// flags: bit0=reverse, bit1=case insensitive (strings), bit2=empty strings at end (strings)
+		int arr_idx, struct_type;
+		unsigned char *tp;
+		int flags = 0;
+		int member_type, member_offset, member_size;
+		int num_elements;
+		int struct_size;
+
+		skipspace(p);
+
+		// Get array variable with member access: array().membername
+		// findvar will resolve the member access and set g_StructMemberType/Offset/Size
+		findvar(p, V_FIND | V_NOFIND_ERR | V_EMPTY_OK);
+		arr_idx = g_VarIndex;
+
+		// Check it's a struct array with member access
+		if (!(g_vartbl[arr_idx].type & T_STRUCT))
+			error("Expected a structure array");
+		if (g_vartbl[arr_idx].dims[0] == 0)
+			error("Expected a structure array");
+		if (g_StructMemberType == 0)
+			error("Expected structarray().membername syntax");
+
+		// Get member info from globals set by findvar
+		member_type = g_StructMemberType;
+		member_offset = g_StructMemberOffset;
+		member_size = g_StructMemberSize;
+		(void)member_size; // Used for validation, suppress unused warning
+
+		// Member cannot be a nested struct
+		if (member_type == T_STRUCT)
+			error("Cannot sort by nested structure member");
+
+		struct_type = (int)g_vartbl[arr_idx].size;
+		struct_size = g_structtbl[struct_type]->total_size;
+
+		// Calculate number of elements
+		num_elements = 1;
+		for (int d = 0; d < MAXDIM && g_vartbl[arr_idx].dims[d] != 0; d++)
+		{
+			num_elements *= (g_vartbl[arr_idx].dims[d] + 1 - g_OptionBase);
+		}
+
+		// Skip past array().membername to find optional flags
+		tp = skipvar(p, false);
+		skipspace(tp);
+
+		// Check for optional flags parameter
+		if (*tp == ',')
+		{
+			tp++;
+			skipspace(tp);
+			flags = (int)getint(tp, 0, 7);
+		}
+
+		// Get pointer to array data
+		unsigned char *base_ptr = g_vartbl[arr_idx].val.s;
+
+		// Allocate temporary buffer for swap
+		unsigned char *temp = GetTempMemory(struct_size);
+
+		// Shell sort implementation (efficient for medium arrays, in-place)
+		int gap, i, j;
+		int reverse = flags & 1;
+		int case_insensitive = flags & 2;
+		int empty_at_end = flags & 4;
+
+		for (gap = num_elements / 2; gap > 0; gap /= 2)
+		{
+			for (i = gap; i < num_elements; i++)
+			{
+				memcpy(temp, base_ptr + i * struct_size, struct_size);
+
+				for (j = i; j >= gap; j -= gap)
+				{
+					unsigned char *elem_j_gap = base_ptr + (j - gap) * struct_size;
+					unsigned char *val_a = elem_j_gap + member_offset;
+					unsigned char *val_b = temp + member_offset;
+					int cmp = 0;
+
+					// Compare based on member type
+					if (member_type & T_INT)
+					{
+						long long int a = *(long long int *)val_a;
+						long long int b = *(long long int *)val_b;
+						if (a < b)
+							cmp = -1;
+						else if (a > b)
+							cmp = 1;
+						else
+							cmp = 0;
+					}
+					else if (member_type & T_NBR)
+					{
+						MMFLOAT a = *(MMFLOAT *)val_a;
+						MMFLOAT b = *(MMFLOAT *)val_b;
+						if (a < b)
+							cmp = -1;
+						else if (a > b)
+							cmp = 1;
+						else
+							cmp = 0;
+					}
+					else if (member_type & T_STR)
+					{
+						// MMBasic strings: first byte is length
+						int len_a = *val_a;
+						int len_b = *val_b;
+
+						// Handle empty strings at end option
+						if (empty_at_end)
+						{
+							if (len_a == 0 && len_b != 0)
+							{
+								cmp = 1; // Empty string a goes after b
+							}
+							else if (len_a != 0 && len_b == 0)
+							{
+								cmp = -1; // Non-empty a goes before empty b
+							}
+							else if (len_a == 0 && len_b == 0)
+							{
+								cmp = 0; // Both empty, equal
+							}
+							else
+							{
+								// Both non-empty, compare normally
+								int minlen = (len_a < len_b) ? len_a : len_b;
+								if (case_insensitive)
+								{
+									for (int k = 1; k <= minlen; k++)
+									{
+										int ca = toupper(val_a[k]);
+										int cb = toupper(val_b[k]);
+										if (ca < cb)
+										{
+											cmp = -1;
+											break;
+										}
+										if (ca > cb)
+										{
+											cmp = 1;
+											break;
+										}
+									}
+								}
+								else
+								{
+									for (int k = 1; k <= minlen; k++)
+									{
+										if (val_a[k] < val_b[k])
+										{
+											cmp = -1;
+											break;
+										}
+										if (val_a[k] > val_b[k])
+										{
+											cmp = 1;
+											break;
+										}
+									}
+								}
+								if (cmp == 0)
+								{
+									if (len_a < len_b)
+										cmp = -1;
+									else if (len_a > len_b)
+										cmp = 1;
+								}
+							}
+						}
+						else
+						{
+							// Normal string comparison
+							int minlen = (len_a < len_b) ? len_a : len_b;
+							if (case_insensitive)
+							{
+								for (int k = 1; k <= minlen; k++)
+								{
+									int ca = toupper(val_a[k]);
+									int cb = toupper(val_b[k]);
+									if (ca < cb)
+									{
+										cmp = -1;
+										break;
+									}
+									if (ca > cb)
+									{
+										cmp = 1;
+										break;
+									}
+								}
+							}
+							else
+							{
+								for (int k = 1; k <= minlen; k++)
+								{
+									if (val_a[k] < val_b[k])
+									{
+										cmp = -1;
+										break;
+									}
+									if (val_a[k] > val_b[k])
+									{
+										cmp = 1;
+										break;
+									}
+								}
+							}
+							if (cmp == 0)
+							{
+								if (len_a < len_b)
+									cmp = -1;
+								else if (len_a > len_b)
+									cmp = 1;
+							}
+						}
+					}
+
+					// Apply reverse flag
+					if (reverse)
+						cmp = -cmp;
+
+					// If elem[j-gap] > temp, shift it up
+					if (cmp > 0)
+					{
+						memcpy(base_ptr + j * struct_size, elem_j_gap, struct_size);
+					}
+					else
+					{
+						break;
+					}
+				}
+				memcpy(base_ptr + j * struct_size, temp, struct_size);
+			}
+		}
+	}
+	else if ((p = checkstring(cmdline, (unsigned char *)"CLEAR")) != NULL)
+	{
+		// STRUCT CLEAR var or STRUCT CLEAR array()
+		// Resets all members to defaults (0 for numbers, "" for strings)
+		int var_idx, struct_type;
+		unsigned char *var_ptr;
+		int struct_size;
+
+		skipspace(p);
+
+		// Get variable - V_EMPTY_OK allows empty () for arrays
+		var_ptr = findvar(p, V_FIND | V_NOFIND_ERR | V_EMPTY_OK);
+		var_idx = g_VarIndex;
+
+		// Check it's a struct
+		if (!(g_vartbl[var_idx].type & T_STRUCT))
+			error("Expected a structure variable");
+
+		if (g_StructMemberType != 0)
+			error("Cannot clear a structure member, use whole structure");
+
+		struct_type = (int)g_vartbl[var_idx].size;
+		struct_size = g_structtbl[struct_type]->total_size;
+
+		// Calculate total size if array
+		int num_elements = 1;
+		if (g_vartbl[var_idx].dims[0] != 0)
+		{
+			for (int d = 0; d < MAXDIM && g_vartbl[var_idx].dims[d] != 0; d++)
+			{
+				num_elements *= (g_vartbl[var_idx].dims[d] + 1 - g_OptionBase);
+			}
+		}
+
+		// Zero the memory
+		memset(var_ptr, 0, struct_size * num_elements);
+	}
+	else if ((p = checkstring(cmdline, (unsigned char *)"SWAP")) != NULL)
+	{
+		// STRUCT SWAP var1, var2
+		// Swaps two struct variables (must be same type)
+		unsigned char *src_ptr, *dst_ptr;
+		int src_idx, dst_idx;
+		int src_struct_type, dst_struct_type;
+		unsigned char *tp;
+
+		skipspace(p);
+
+		// Get first variable
+		src_ptr = findvar(p, V_FIND | V_NOFIND_ERR);
+		src_idx = g_VarIndex;
+
+		if (!(g_vartbl[src_idx].type & T_STRUCT))
+			error("First argument must be a structure variable");
+
+		if (g_StructMemberType != 0)
+			error("Cannot swap structure member, use whole structure");
+
+		src_struct_type = (int)g_vartbl[src_idx].size;
+
+		// Skip past first variable to find comma
+		tp = skipvar(p, false);
+		skipspace(tp);
+
+		if (*tp != ',')
+			error("Expected comma");
+		tp++;
+		skipspace(tp);
+
+		// Get second variable
+		dst_ptr = findvar(tp, V_FIND | V_NOFIND_ERR);
+		dst_idx = g_VarIndex;
+
+		if (!(g_vartbl[dst_idx].type & T_STRUCT))
+			error("Second argument must be a structure variable");
+
+		if (g_StructMemberType != 0)
+			error("Cannot swap structure member, use whole structure");
+
+		dst_struct_type = (int)g_vartbl[dst_idx].size;
+
+		// Validate same struct type
+		if (src_struct_type != dst_struct_type)
+			error("Structure types must match");
+
+		// Perform the swap using temp memory
+		int swap_size = g_structtbl[src_struct_type]->total_size;
+		unsigned char *temp = GetTempMemory(swap_size);
+		memcpy(temp, src_ptr, swap_size);
+		memcpy(src_ptr, dst_ptr, swap_size);
+		memcpy(dst_ptr, temp, swap_size);
+	}
+	else if ((p = checkstring(cmdline, (unsigned char *)"SAVE")) != NULL)
+	{
+		// STRUCT SAVE #n, var or STRUCT SAVE #n, array() or STRUCT SAVE #n, array(i)
+		// Writes struct data as binary to open file
+		int fnbr;
+		int var_idx, struct_type, struct_size;
+		unsigned char *var_ptr;
+
+		skipspace(p);
+
+		// Get file number
+		if (*p != '#')
+			error("Expected #filenumber");
+		p++;
+		fnbr = getinteger(p);
+
+		// Validate file number and that it's a disk file
+		if (fnbr < 1 || fnbr > MAXOPENFILES)
+			error("Invalid file number");
+		if (FileTable[fnbr].com == 0)
+			error("File not open");
+		if (FileTable[fnbr].com <= MAXCOMPORTS)
+			error("Not a disk file");
+
+		// Skip past file number to comma
+		while (*p && *p != ',')
+			p++;
+		if (*p != ',')
+			error("Expected comma");
+		p++;
+		skipspace(p);
+
+		// Save pointer to variable name for parenthesis check
+		unsigned char *varname = p;
+
+		// Get variable - V_EMPTY_OK allows empty () for arrays
+		var_ptr = findvar(p, V_FIND | V_NOFIND_ERR | V_EMPTY_OK);
+		var_idx = g_VarIndex;
+
+		if (!(g_vartbl[var_idx].type & T_STRUCT))
+			error("Expected a structure variable");
+
+		if (g_StructMemberType != 0)
+			error("Cannot save a structure member, use whole structure");
+
+		struct_type = (int)g_vartbl[var_idx].size;
+		struct_size = g_structtbl[struct_type]->total_size;
+
+		// Determine if it's an array and how to handle it
+		int num_elements = 1;
+		int is_array = (g_vartbl[var_idx].dims[0] != 0);
+
+		if (is_array)
+		{
+			// Check for parentheses
+			unsigned char *paren = (unsigned char *)strchr((char *)varname, '(');
+			if (!paren)
+				error("Array variable requires () or (index)");
+
+			paren++;
+			skipspace(paren);
+			if (*paren == ')')
+			{
+				// Empty brackets - save entire array
+				for (int d = 0; d < MAXDIM && g_vartbl[var_idx].dims[d] != 0; d++)
+				{
+					num_elements *= (g_vartbl[var_idx].dims[d] + 1 - g_OptionBase);
+				}
+			}
+			else
+			{
+				// Has index - findvar already resolved to the correct element
+				// var_ptr points to the specific element, save just one
+				num_elements = 1;
+			}
+		}
+
+		// Write struct data to file
+		FilePutData((char *)var_ptr, fnbr, struct_size * num_elements);
+	}
+	else if ((p = checkstring(cmdline, (unsigned char *)"LOAD")) != NULL)
+	{
+		// STRUCT LOAD #n, var or STRUCT LOAD #n, array() or STRUCT LOAD #n, array(i)
+		// Reads struct data as binary from open file
+		int fnbr;
+		int var_idx, struct_type, struct_size;
+		unsigned char *var_ptr;
+		unsigned int bytes_read;
+
+		skipspace(p);
+
+		// Get file number
+		if (*p != '#')
+			error("Expected #filenumber");
+		p++;
+		fnbr = getinteger(p);
+
+		// Validate file number and that it's a disk file
+		if (fnbr < 1 || fnbr > MAXOPENFILES)
+			error("Invalid file number");
+		if (FileTable[fnbr].com == 0)
+			error("File not open");
+		if (FileTable[fnbr].com <= MAXCOMPORTS)
+			error("Not a disk file");
+
+		// Skip past file number to comma
+		while (*p && *p != ',')
+			p++;
+		if (*p != ',')
+			error("Expected comma");
+		p++;
+		skipspace(p);
+
+		// Save pointer to variable name for parenthesis check
+		unsigned char *varname = p;
+
+		// Get variable - V_EMPTY_OK allows empty () for arrays
+		var_ptr = findvar(p, V_FIND | V_NOFIND_ERR | V_EMPTY_OK);
+		var_idx = g_VarIndex;
+
+		if (!(g_vartbl[var_idx].type & T_STRUCT))
+			error("Expected a structure variable");
+
+		if (g_StructMemberType != 0)
+			error("Cannot load into a structure member, use whole structure");
+
+		struct_type = (int)g_vartbl[var_idx].size;
+		struct_size = g_structtbl[struct_type]->total_size;
+
+		// Determine if it's an array and how to handle it
+		int num_elements = 1;
+		int is_array = (g_vartbl[var_idx].dims[0] != 0);
+
+		if (is_array)
+		{
+			// Check for parentheses
+			unsigned char *paren = (unsigned char *)strchr((char *)varname, '(');
+			if (!paren)
+				error("Array variable requires () or (index)");
+
+			paren++;
+			skipspace(paren);
+			if (*paren == ')')
+			{
+				// Empty brackets - load entire array
+				for (int d = 0; d < MAXDIM && g_vartbl[var_idx].dims[d] != 0; d++)
+				{
+					num_elements *= (g_vartbl[var_idx].dims[d] + 1 - g_OptionBase);
+				}
+			}
+			else
+			{
+				// Has index - findvar already resolved to the correct element
+				// var_ptr points to the specific element, load just one
+				num_elements = 1;
+			}
+		}
+
+		// Read struct data from file
+		FileGetData(fnbr, var_ptr, struct_size * num_elements, &bytes_read);
+	}
+	else if ((p = checkstring(cmdline, (unsigned char *)"PRINT")) != NULL)
+	{
+		// STRUCT PRINT var or STRUCT PRINT array() or STRUCT PRINT array(n)
+		// Prints all members of a structure for debugging
+		int var_idx, struct_type, struct_size;
+		unsigned char *var_ptr;
+		struct s_structdef *sd;
+
+		skipspace(p);
+
+		// Get variable - V_EMPTY_OK allows empty () for arrays
+		var_ptr = findvar(p, V_FIND | V_NOFIND_ERR | V_EMPTY_OK);
+		var_idx = g_VarIndex;
+
+		if (!(g_vartbl[var_idx].type & T_STRUCT))
+			error("Expected a structure variable");
+
+		if (g_StructMemberType != 0)
+			error("Cannot print a structure member, use whole structure");
+
+		struct_type = (int)g_vartbl[var_idx].size;
+		struct_size = g_structtbl[struct_type]->total_size;
+		sd = g_structtbl[struct_type];
+
+		// Calculate number of elements to print
+		int num_elements = 1;
+		int is_array = (g_vartbl[var_idx].dims[0] != 0);
+		int single_element = 0;
+
+		// Check if this is an indexed array access (e.g., arr(2)) vs whole array (arr())
+		// If findvar resolved to a specific element, var_ptr points to that element
+		// We detect this by checking if parentheses contain a value
+		unsigned char *paren = (unsigned char *)strchr((char *)p, '(');
+		if (paren && is_array)
+		{
+			paren++;
+			skipspace(paren);
+			if (*paren != ')')
+			{
+				// Has an index - print single element
+				single_element = 1;
+				num_elements = 1;
+			}
+		}
+
+		if (is_array && !single_element)
+		{
+			for (int d = 0; d < MAXDIM && g_vartbl[var_idx].dims[d] != 0; d++)
+			{
+				num_elements *= (g_vartbl[var_idx].dims[d] + 1 - g_OptionBase);
+			}
+		}
+
+		// Print structure type name
+		MMPrintString((char *)sd->name);
+		if (is_array && !single_element)
+		{
+			char buf[32];
+			sprintf(buf, " array (%d elements):\r\n", num_elements);
+			MMPrintString(buf);
+		}
+		else if (single_element)
+		{
+			MMPrintString(":\r\n");
+		}
+		else
+		{
+			MMPrintString(":\r\n");
+		}
+
+		// Print each element
+		for (int elem = 0; elem < num_elements; elem++)
+		{
+			unsigned char *elem_ptr = var_ptr + (elem * struct_size);
+
+			if (is_array && !single_element)
+			{
+				char buf[32];
+				sprintf(buf, "[%d]:\r\n", elem + g_OptionBase);
+				MMPrintString(buf);
+			}
+
+			// Print each member
+			for (int m = 0; m < sd->num_members; m++)
+			{
+				struct s_structmember *sm = &sd->members[m];
+				unsigned char *member_ptr = elem_ptr + sm->offset;
+				char buf[STRINGSIZE];
+
+				// Calculate array elements for this member
+				int member_elements = 1;
+				for (int d = 0; d < MAXDIM && sm->dims[d] != 0; d++)
+				{
+					member_elements *= (sm->dims[d] + 1 - g_OptionBase);
+				}
+
+				if (sm->type == T_STRUCT)
+				{
+					// Nested structure - print recursively with indentation
+					struct s_structdef *nested_sd = g_structtbl[sm->size];
+					sprintf(buf, "  .%s = %s:\r\n", sm->name, nested_sd->name);
+					MMPrintString(buf);
+
+					// Print nested members with extra indent
+					for (int nm = 0; nm < nested_sd->num_members; nm++)
+					{
+						struct s_structmember *nsm = &nested_sd->members[nm];
+						unsigned char *nested_ptr = member_ptr + nsm->offset;
+
+						sprintf(buf, "    .%s = ", nsm->name);
+						MMPrintString(buf);
+
+						if (nsm->type == T_INT)
+						{
+							long long int val = *(long long int *)nested_ptr;
+							sprintf(buf, "%lld", val);
+							MMPrintString(buf);
+						}
+						else if (nsm->type == T_NBR)
+						{
+							MMFLOAT val = *(MMFLOAT *)nested_ptr;
+							sprintf(buf, "%g", val);
+							MMPrintString(buf);
+						}
+						else if (nsm->type == T_STR)
+						{
+							MMPrintString("\"");
+							int len = *nested_ptr;
+							for (int c = 0; c < len; c++)
+							{
+								char ch[2] = {nested_ptr[c + 1], 0};
+								MMPrintString(ch);
+							}
+							MMPrintString("\"");
+						}
+						else if (nsm->type == T_STRUCT)
+						{
+							MMPrintString("(nested struct - use deeper access)");
+						}
+						MMPrintString("\r\n");
+					}
+				}
+				else if (member_elements == 1)
+				{
+					// Simple member (not an array)
+					sprintf(buf, "  .%s = ", sm->name);
+					MMPrintString(buf);
+
+					if (sm->type == T_INT)
+					{
+						long long int val = *(long long int *)member_ptr;
+						sprintf(buf, "%lld", val);
+						MMPrintString(buf);
+					}
+					else if (sm->type == T_NBR)
+					{
+						MMFLOAT val = *(MMFLOAT *)member_ptr;
+						sprintf(buf, "%g", val);
+						MMPrintString(buf);
+					}
+					else if (sm->type == T_STR)
+					{
+						MMPrintString("\"");
+						// String: first byte is length
+						int len = *member_ptr;
+						for (int c = 0; c < len; c++)
+						{
+							char ch[2] = {member_ptr[c + 1], 0};
+							MMPrintString(ch);
+						}
+						MMPrintString("\"");
+					}
+					MMPrintString("\r\n");
+				}
+				else
+				{
+					// Array member
+					sprintf(buf, "  .%s() = ", sm->name);
+					MMPrintString(buf);
+
+					int elem_size;
+					if (sm->type == T_STR)
+						elem_size = sm->size + 1; // +1 for length byte
+					else
+						elem_size = sm->size;
+
+					for (int ai = 0; ai < member_elements; ai++)
+					{
+						unsigned char *arr_ptr = member_ptr + (ai * elem_size);
+
+						if (ai > 0)
+							MMPrintString(", ");
+
+						if (sm->type == T_INT)
+						{
+							long long int val = *(long long int *)arr_ptr;
+							sprintf(buf, "%lld", val);
+							MMPrintString(buf);
+						}
+						else if (sm->type == T_NBR)
+						{
+							MMFLOAT val = *(MMFLOAT *)arr_ptr;
+							sprintf(buf, "%g", val);
+							MMPrintString(buf);
+						}
+						else if (sm->type == T_STR)
+						{
+							MMPrintString("\"");
+							int len = *arr_ptr;
+							for (int c = 0; c < len; c++)
+							{
+								char ch[2] = {arr_ptr[c + 1], 0};
+								MMPrintString(ch);
+							}
+							MMPrintString("\"");
+						}
+					}
+					MMPrintString("\r\n");
+				}
+			}
+		}
+	}
+	else if ((p = checkstring(cmdline, (unsigned char *)"EXTRACT")) != NULL)
+	{
+		// STRUCT EXTRACT structarray().membername, destarray()
+		// Extracts a single member from each structure in an array into a simple array
+		// This allows structure data to be used with commands that expect contiguous arrays
+		// (e.g., LINE PLOT, MATH commands)
+		int src_idx, dst_idx, struct_type, struct_size;
+		unsigned char *tp;
+		int member_type, member_offset, member_size;
+		int src_num_elements, dst_num_elements;
+		unsigned char *src_base, *dst_base;
+
+		skipspace(p);
+
+		// Get source struct array with member access: structarray().membername
+		// findvar will resolve the member access and set g_StructMemberType/Offset/Size
+		findvar(p, V_FIND | V_NOFIND_ERR | V_EMPTY_OK);
+		src_idx = g_VarIndex;
+
+		// Check it's a struct array with member access
+		if (!(g_vartbl[src_idx].type & T_STRUCT))
+			error("Expected a structure array");
+		if (g_vartbl[src_idx].dims[0] == 0)
+			error("Expected a structure array, not a single structure");
+		if (g_vartbl[src_idx].dims[1] != 0)
+			error("Only 1-dimensional structure arrays are supported");
+		if (g_StructMemberType == 0)
+			error("Expected structarray().membername syntax");
+
+		// Get member info from globals set by findvar
+		member_type = g_StructMemberType;
+		member_offset = g_StructMemberOffset;
+		member_size = g_StructMemberSize;
+
+		// Member cannot be a nested struct
+		if (member_type == T_STRUCT)
+			error("Cannot extract nested structure member");
+
+		struct_type = (int)g_vartbl[src_idx].size;
+		struct_size = g_structtbl[struct_type]->total_size;
+
+		// Calculate number of source elements
+		src_num_elements = g_vartbl[src_idx].dims[0] + 1 - g_OptionBase;
+		src_base = g_vartbl[src_idx].val.s;
+
+		// Skip past structarray().membername to find the comma
+		tp = skipvar(p, false);
+		skipspace(tp);
+
+		if (*tp != ',')
+			error("Expected comma and destination array");
+		tp++;
+		skipspace(tp);
+
+		// Get destination array with empty ()
+		dst_base = findvar(tp, V_FIND | V_NOFIND_ERR | V_EMPTY_OK);
+		dst_idx = g_VarIndex;
+
+		// Check destination is a simple array (not struct)
+		if (g_vartbl[dst_idx].type & T_STRUCT)
+			error("Destination must be a simple array, not a structure");
+		if (g_vartbl[dst_idx].dims[0] == 0)
+			error("Destination must be an array");
+		if (g_vartbl[dst_idx].dims[1] != 0)
+			error("Destination must be a 1-dimensional array");
+
+		// Calculate destination array size
+		dst_num_elements = g_vartbl[dst_idx].dims[0] + 1 - g_OptionBase;
+
+		// Check cardinality matches
+		if (dst_num_elements != src_num_elements)
+			error("Arrays must have the same size (source=%, dest=%)", src_num_elements, dst_num_elements);
+
+		// Check types match
+		int dst_type = g_vartbl[dst_idx].type & (T_INT | T_NBR | T_STR);
+		if (dst_type != member_type)
+			error("Type mismatch: structure member and destination array must have same type");
+
+		// For strings, check length matches
+		if (member_type == T_STR)
+		{
+			int dst_str_size = g_vartbl[dst_idx].size; // max string length for dest array
+			if (dst_str_size != member_size)
+				error("String length mismatch: member length=%, array length=%", member_size, dst_str_size);
+		}
+
+		// Perform the extraction
+		if (member_type == T_INT)
+		{
+			long long int *dst = (long long int *)dst_base;
+			for (int i = 0; i < src_num_elements; i++)
+			{
+				unsigned char *src_elem = src_base + (i * struct_size) + member_offset;
+				dst[i] = *(long long int *)src_elem;
+			}
+		}
+		else if (member_type == T_NBR)
+		{
+			MMFLOAT *dst = (MMFLOAT *)dst_base;
+			for (int i = 0; i < src_num_elements; i++)
+			{
+				unsigned char *src_elem = src_base + (i * struct_size) + member_offset;
+				dst[i] = *(MMFLOAT *)src_elem;
+			}
+		}
+		else if (member_type == T_STR)
+		{
+			int str_size = member_size + 1; // +1 for length byte
+			for (int i = 0; i < src_num_elements; i++)
+			{
+				unsigned char *src_elem = src_base + (i * struct_size) + member_offset;
+				unsigned char *dst_elem = dst_base + (i * str_size);
+				memcpy(dst_elem, src_elem, str_size);
+			}
+		}
+	}
+	else if ((p = checkstring(cmdline, (unsigned char *)"INSERT")) != NULL)
+	{
+		// STRUCT INSERT srcarray(), structarray().membername
+		// Inserts values from a simple array into the specified member of each structure element
+		// This is the reverse of STRUCT EXTRACT
+		int src_idx, dst_idx, struct_type, struct_size;
+		unsigned char *tp;
+		int member_type, member_offset, member_size;
+		int src_num_elements, dst_num_elements;
+		unsigned char *src_base, *dst_base;
+
+		skipspace(p);
+
+		// Get source simple array variable with empty ()
+		src_base = findvar(p, V_FIND | V_NOFIND_ERR | V_EMPTY_OK);
+		src_idx = g_VarIndex;
+
+		// Check source is a simple array (not struct)
+		if (g_vartbl[src_idx].type & T_STRUCT)
+			error("Source must be a simple array, not a structure");
+		if (g_vartbl[src_idx].dims[0] == 0)
+			error("Source must be an array");
+		if (g_vartbl[src_idx].dims[1] != 0)
+			error("Source must be a 1-dimensional array");
+
+		// Calculate source array size
+		src_num_elements = g_vartbl[src_idx].dims[0] + 1 - g_OptionBase;
+		int src_type = g_vartbl[src_idx].type & (T_INT | T_NBR | T_STR);
+		int src_str_size = g_vartbl[src_idx].size; // for strings
+
+		// Skip past source array to find comma
+		tp = skipvar(p, false);
+		skipspace(tp);
+
+		if (*tp != ',')
+			error("Expected comma after source array");
+		tp++;
+		skipspace(tp);
+
+		// Get destination struct array with member access: structarray().membername
+		// findvar will resolve the member access and set g_StructMemberType/Offset/Size
+		dst_base = findvar(tp, V_FIND | V_NOFIND_ERR | V_EMPTY_OK);
+		dst_idx = g_VarIndex;
+
+		// Check it's a struct array with member access
+		if (!(g_vartbl[dst_idx].type & T_STRUCT))
+			error("Expected a structure array");
+		if (g_vartbl[dst_idx].dims[0] == 0)
+			error("Expected a structure array, not a single structure");
+		if (g_vartbl[dst_idx].dims[1] != 0)
+			error("Only 1-dimensional structure arrays are supported");
+		if (g_StructMemberType == 0)
+			error("Expected structarray().membername syntax");
+
+		// Get member info from globals set by findvar
+		member_type = g_StructMemberType;
+		member_offset = g_StructMemberOffset;
+		member_size = g_StructMemberSize;
+
+		// Member cannot be a nested struct
+		if (member_type == T_STRUCT)
+			error("Cannot insert into nested structure member");
+
+		struct_type = (int)g_vartbl[dst_idx].size;
+		struct_size = g_structtbl[struct_type]->total_size;
+
+		// Calculate number of destination elements
+		dst_num_elements = g_vartbl[dst_idx].dims[0] + 1 - g_OptionBase;
+
+		// Use dst_base from the struct variable, not from member resolution
+		dst_base = g_vartbl[dst_idx].val.s;
+
+		// Check cardinality matches
+		if (src_num_elements != dst_num_elements)
+			error("Arrays must have the same size (source=%, dest=%)", src_num_elements, dst_num_elements);
+
+		// Check types match
+		if (src_type != member_type)
+			error("Type mismatch: source array and structure member must have same type");
+
+		// For strings, check length matches
+		if (member_type == T_STR)
+		{
+			if (src_str_size != member_size)
+				error("String length mismatch: array length=%, member length=%", src_str_size, member_size);
+		}
+
+		// Perform the insertion
+		if (member_type == T_INT)
+		{
+			long long int *src = (long long int *)src_base;
+			for (int i = 0; i < dst_num_elements; i++)
+			{
+				unsigned char *dst_elem = dst_base + (i * struct_size) + member_offset;
+				*(long long int *)dst_elem = src[i];
+			}
+		}
+		else if (member_type == T_NBR)
+		{
+			MMFLOAT *src = (MMFLOAT *)src_base;
+			for (int i = 0; i < dst_num_elements; i++)
+			{
+				unsigned char *dst_elem = dst_base + (i * struct_size) + member_offset;
+				*(MMFLOAT *)dst_elem = src[i];
+			}
+		}
+		else if (member_type == T_STR)
+		{
+			int str_size = member_size + 1; // +1 for length byte
+			for (int i = 0; i < dst_num_elements; i++)
+			{
+				unsigned char *src_elem = src_base + (i * str_size);
+				unsigned char *dst_elem = dst_base + (i * struct_size) + member_offset;
+				memcpy(dst_elem, src_elem, str_size);
+			}
+		}
+	}
+	else
+	{
+		error("Unknown STRUCT subcommand");
+	}
+}
+
+// Parse a structure member definition line (called from PrepareProgramExt)
+// Line format: membername[(dim1[,dim2,...])] AS type [LENGTH n]
+// Returns: NULL if valid member parsed, error message string if error
+const char *ParseStructMember(unsigned char *p, struct s_structdef *sd)
+{
+	unsigned char name[MAXVARLEN + 1];
+	int namelen = 0;
+	int type = T_NOTYPE;
+	int size = 0;
+	int offset;
+	struct s_structmember *sm;
+	short dims[MAXDIM] = {0};
+	int ndims = 0;
+	int array_elements = 1;
+
+	if (sd->num_members >= MAX_STRUCT_MEMBERS)
+		return "Too many members in TYPE";
+
+	skipspace(p);
+
+	// Parse member name
+	if (!isnamestart(*p))
+		return "Invalid member definition in TYPE"; // Not a valid member definition
+
+	while (isnamechar(*p) && *p != '(' && namelen < MAXVARLEN)
+	{
+		name[namelen++] = mytoupper(*p++);
+	}
+	name[namelen] = 0;
+
+	skipspace(p);
+
+	// Check for array dimensions
+	if (*p == '(')
+	{
+		p++; // Skip opening parenthesis
+		skipspace(p);
+
+		while (*p && *p != ')' && ndims < MAXDIM)
+		{
+			// Parse dimension value manually (can't use getint during preprocess)
+			int dim = 0;
+			while (*p >= '0' && *p <= '9')
+			{
+				dim = dim * 10 + (*p - '0');
+				p++;
+			}
+			if (dim < 1)
+				dim = 1;
+			dims[ndims++] = dim;
+			array_elements *= (dim + 1 - g_OptionBase); // Account for OPTION BASE
+
+			skipspace(p);
+			if (*p == ',')
+			{
+				p++;
+				skipspace(p);
+			}
+		}
+
+		if (*p == ')')
+			p++; // Skip closing parenthesis
+		skipspace(p);
+	}
+
+	skipspace(p);
+
+	// Expect AS keyword (tokenized or literal)
+	if (*p == tokenAS)
+	{
+		p++; // Skip past token
+	}
+	else if ((p[0] == 'A' || p[0] == 'a') && (p[1] == 'S' || p[1] == 's') && !isnamechar(p[2]))
+	{
+		p += 2; // Skip past literal AS
+	}
+	else
+	{
+		return "Invalid member definition in TYPE"; // Not a valid member definition (no AS keyword)
+	}
+	skipspace(p);
+
+	// Parse type (checkstring handles both tokenized and literal forms)
+	unsigned char *tp;
+	if ((tp = checkstring(p, (unsigned char *)"INTEGER")) != NULL ||
+		(tp = checkstring(p, (unsigned char *)"INT")) != NULL)
+	{
+		type = T_INT;
+		size = sizeof(long long int);
+		p = tp;
+	}
+	else if ((tp = checkstring(p, (unsigned char *)"FLOAT")) != NULL)
+	{
+		type = T_NBR;
+		size = sizeof(MMFLOAT);
+		p = tp;
+	}
+	else if ((tp = checkstring(p, (unsigned char *)"STRING")) != NULL)
+	{
+		type = T_STR;
+		p = tp;
+		skipspace(p);
+		// Check for STRING LENGTH n (consistent with DIM syntax)
+		if ((tp = checkstring(p, (unsigned char *)"LENGTH")) != NULL)
+		{
+			p = tp;
+			skipspace(p);
+			// Parse the size number manually (can't use getint during preprocess)
+			size = 0;
+			while (*p >= '0' && *p <= '9')
+			{
+				size = size * 10 + (*p - '0');
+				p++;
+			}
+			if (size < 1)
+				size = 1;
+			if (size > MAXSTRLEN)
+				size = MAXSTRLEN;
+		}
+		else
+		{
+			size = MAXSTRLEN; // Default string length
+		}
+	}
+	else
+	{
+		// Check if it's a previously defined structure type
+		unsigned char typename[MAXVARLEN + 1];
+		int typenamelen = 0;
+		unsigned char *tp2 = p;
+
+		// Parse the type name
+		while (isnamechar(*tp2) && typenamelen < MAXVARLEN)
+		{
+			typename[typenamelen++] = mytoupper(*tp2++);
+		}
+		typename[typenamelen] = 0;
+
+		if (typenamelen > 0)
+		{
+			// Search for this type name in already-defined struct types
+			int nested_idx = -1;
+			for (int i = 0; i < g_structcnt; i++)
+			{
+				if (g_structtbl[i] != NULL && strcmp((char *)typename, (char *)g_structtbl[i]->name) == 0)
+				{
+					nested_idx = i;
+					break;
+				}
+			}
+
+			if (nested_idx >= 0)
+			{
+				// Found a nested structure type
+				type = T_STRUCT;
+				size = nested_idx; // Store struct type index in size field
+				p = tp2;
+			}
+			else
+			{
+				return "Unknown type in TYPE definition";
+			}
+		}
+		else
+		{
+			return "Unknown type in TYPE definition";
+		}
+	}
+
+	// Calculate offset (align to natural boundary)
+	offset = sd->total_size;
+	// Align integers, floats, and nested structures to 8-byte boundary
+	if ((type == T_INT || type == T_NBR || type == T_STRUCT) && (offset % 8) != 0)
+	{
+		offset = ((offset / 8) + 1) * 8;
+	}
+
+	// Add the member
+	sm = &sd->members[sd->num_members];
+	memcpy(sm->name, name, namelen + 1);
+	sm->type = type;
+	sm->size = size;
+	sm->offset = offset;
+
+	// Store array dimensions
+	for (int i = 0; i < MAXDIM; i++)
+	{
+		sm->dims[i] = dims[i];
+	}
+
+	sd->num_members++;
+
+	// Update total size (accounting for array elements)
+	if (type == T_STR)
+		sd->total_size = offset + (size + 1) * array_elements; // +1 for length byte per element
+	else if (type == T_STRUCT)
+	{
+		// For nested structures, size field contains the struct type index
+		int nested_size = g_structtbl[size]->total_size;
+		sd->total_size = offset + nested_size * array_elements;
+	}
+	else
+		sd->total_size = offset + size * array_elements;
+
+	return NULL; // Successfully parsed a member (NULL means no error)
+}
+
+// Helper function to find a structure type by name (RP2350 only)
+#ifdef rp2350
+int FindStructType(unsigned char *name)
+#else
+int MIPS16 FindStructType(unsigned char *name)
+#endif
+{
+	int i, namelen = 0;
+	unsigned char uname[MAXVARLEN + 1];
+
+	// Convert to uppercase for comparison
+	while (isnamechar(*name) && *name != '.' && namelen < MAXVARLEN)
+	{
+		uname[namelen++] = mytoupper(*name++);
+	}
+	uname[namelen] = 0;
+
+	for (i = 0; i < g_structcnt; i++)
+	{
+		if (strcmp((char *)uname, (char *)g_structtbl[i]->name) == 0)
+			return i;
+	}
+	return -1;
+}
+
+// Helper function to find a member within a structure definition (RP2350 only)
+// Returns member index or -1 if not found
+// Also sets *member_type, *member_offset, *member_size if found
+// member_dims should point to array of MAXDIM shorts, will be filled with dimensions
+#ifdef rp2350
+int FindStructMember(int struct_idx, unsigned char *membername, int *member_type, int *member_offset, int *member_size, short *member_dims)
+#else
+int MIPS16 FindStructMember(int struct_idx, unsigned char *membername, int *member_type, int *member_offset, int *member_size, short *member_dims)
+#endif
+{
+	int i, namelen = 0;
+	unsigned char uname[MAXVARLEN + 1];
+	struct s_structdef *sd;
+
+	if (struct_idx < 0 || struct_idx >= g_structcnt)
+		return -1;
+
+	sd = g_structtbl[struct_idx];
+
+	// Convert member name to uppercase (stop at '.', '(' or end of name)
+	while (isnamechar(*membername) && *membername != '.' && *membername != '(' && namelen < MAXVARLEN)
+	{
+		uname[namelen++] = mytoupper(*membername++);
+	}
+	uname[namelen] = 0;
+
+	// Search for member
+	for (i = 0; i < sd->num_members; i++)
+	{
+		if (strcmp((char *)uname, (char *)sd->members[i].name) == 0)
+		{
+			if (member_type)
+				*member_type = sd->members[i].type;
+			if (member_offset)
+				*member_offset = sd->members[i].offset;
+			if (member_size)
+				*member_size = sd->members[i].size;
+			if (member_dims)
+			{
+				for (int j = 0; j < MAXDIM; j++)
+				{
+					member_dims[j] = sd->members[i].dims[j];
+				}
+			}
+			return i;
+		}
+	}
+	return -1;
+}
+
+// STRUCT(FIND array(), membername$, value [, start])
+// General structure function with subfunctions
+// FIND: Searches a struct array for an element where the specified member equals the value
+//       Returns the index of the first match (starting from 'start'), or -1 if not found
+//       Optional 'start' parameter allows iteration through multiple matches
+#ifdef rp2350
+void fun_struct(void)
+#else
+void MIPS16 fun_struct(void)
+#endif
+{
+	unsigned char *p;
+
+	// Check for FIND subfunction: STRUCT(FIND array().member, value [, start] [, size])
+	// argc==3: array().member, value (simple match)
+	// argc==5: array().member, value, start (simple match with start index)
+	// argc==7: array().member, value [, start], size (regex match, start optional)
+	if ((p = checkstring(ep, (unsigned char *)"FIND")) != NULL)
+	{
+		unsigned char *member_base;
+		int var_idx, struct_type, struct_size;
+		int member_type, member_offset, member_size;
+		int num_elements, i, start_idx;
+		int use_regex = 0;
+		void *size_var = NULL;
+		int64_t *size_var_int = NULL;
+		MMFLOAT *size_var_float = NULL;
+
+		// Parse remaining arguments: array().member, value [, start] [, size]
+		getcsargs(&p, 7); // array().member, value [, start] [, size] = up to 7 tokens
+		if (argc != 3 && argc != 5 && argc != 7)
+			error("Syntax: STRUCT(FIND array().member, value [, start] [, size])");
+
+		// Determine if regex mode (argc==7 means regex with size variable)
+		if (argc == 7)
+			use_regex = 1;
+
+		// Get the struct array member variable (argv[0])
+		// This uses findvar which will populate g_StructMemberOffset and g_StructMemberSize
+		member_base = findvar(argv[0], V_FIND | V_NOFIND_ERR | V_EMPTY_OK);
+		var_idx = g_VarIndex;
+
+		if (!(g_vartbl[var_idx].type & T_STRUCT))
+			error("Expected a structure array");
+
+		if (g_vartbl[var_idx].dims[0] == 0)
+			error("Expected an array of structures");
+
+		// Check that a member was specified (findvar sets g_StructMemberOffset)
+		if (g_StructMemberOffset < 0)
+			error("Must specify a member (e.g., array().membername)");
+
+		struct_type = (int)g_vartbl[var_idx].size;
+		struct_size = g_structtbl[struct_type]->total_size;
+		member_offset = g_StructMemberOffset;
+		member_size = g_StructMemberSize;
+
+		// Get array base pointer (member_base points to member in element 0)
+		unsigned char *array_base = member_base - member_offset;
+
+		// Calculate number of elements
+		num_elements = 1;
+		for (int d = 0; d < MAXDIM && g_vartbl[var_idx].dims[d] != 0; d++)
+		{
+			num_elements *= (g_vartbl[var_idx].dims[d] + 1 - g_OptionBase);
+		}
+
+		// Determine member type from member_size and structure definition
+		// member_size > 8 means string (includes length byte)
+		if (member_size > 8)
+		{
+			member_type = T_STR;
+		}
+		else
+		{
+			// Check if the member is integer or float by looking at the structure definition
+			struct s_structdef *sd = g_structtbl[struct_type];
+			member_type = T_NBR; // default
+			for (int m = 0; m < sd->num_members; m++)
+			{
+				if (sd->members[m].offset == member_offset)
+				{
+					member_type = sd->members[m].type & (T_INT | T_NBR | T_STR);
+					break;
+				}
+			}
+		}
+
+		// Get search value and determine its type (argv[2])
+		MMFLOAT f;
+		long long int i64;
+		unsigned char *s = NULL;
+		int t = T_NOTYPE;
+		evaluate(argv[2], &f, &i64, &s, &t, false);
+
+		// Get optional start index (argv[4] if provided and non-empty)
+		// For regex mode (argc==7): start is in argv[4] (optional), size var is in argv[6]
+		// For simple mode (argc==5): start is in argv[4]
+		start_idx = 0;
+		if (argc >= 5 && *argv[4])
+		{
+			start_idx = getint(argv[4], g_OptionBase, g_OptionBase + num_elements) - g_OptionBase;
+			// If start is past end of array, return -1 immediately
+			if (start_idx >= num_elements)
+			{
+				targ = T_INT;
+				iret = -1;
+				return;
+			}
+		}
+
+		// For regex mode, get the size variable (argv[6])
+		if (use_regex)
+		{
+			if (member_type != T_STR)
+				error("Regex search only works with string members");
+			if (!(t & T_STR))
+				error("Regex pattern must be a string");
+
+			int size_vtype;
+			size_var = findvar(argv[6], V_FIND);
+			size_vtype = g_vartbl[g_VarIndex].type;
+#ifdef STRUCTENABLED
+			if (g_StructMemberType != 0)
+				size_vtype = g_StructMemberType;
+#endif
+			if (!(size_vtype & (T_NBR | T_INT)))
+				error("Size variable must be numeric");
+			if (size_vtype & T_INT)
+				size_var_int = size_var;
+			else
+				size_var_float = size_var;
+		}
+
+		// Search the array starting from start_idx
+		targ = T_INT;
+		for (i = start_idx; i < num_elements; i++)
+		{
+			unsigned char *elem_ptr = array_base + (i * struct_size);
+			unsigned char *member_ptr = elem_ptr + member_offset;
+
+			if (member_type == T_INT)
+			{
+				long long int val = *(long long int *)member_ptr;
+				long long int search_val = 0;
+				if (t & T_INT)
+					search_val = i64;
+				else if (t & T_NBR)
+					search_val = (long long int)f;
+				else
+					error("Type mismatch: expected numeric value");
+
+				if (val == search_val)
+				{
+					iret = i + g_OptionBase;
+					return;
+				}
+			}
+			else if (member_type == T_NBR)
+			{
+				MMFLOAT val = *(MMFLOAT *)member_ptr;
+				MMFLOAT search_val = 0;
+				if (t & T_NBR)
+					search_val = f;
+				else if (t & T_INT)
+					search_val = (MMFLOAT)i64;
+				else
+					error("Type mismatch: expected numeric value");
+
+				if (val == search_val)
+				{
+					iret = i + g_OptionBase;
+					return;
+				}
+			}
+			else if (member_type == T_STR)
+			{
+				unsigned char *val = member_ptr; // Points to length byte
+
+				if (use_regex)
+				{
+					// Regex search mode
+					int match_length;
+					char *text_cstr = GetTempMemory(STRINGSIZE);
+					char *pattern_cstr = GetTempMemory(STRINGSIZE);
+
+					// Convert MMBasic string to C string
+					memcpy(text_cstr, val + 1, *val);
+					text_cstr[*val] = '\0';
+
+					// Convert pattern (s is MMBasic string)
+					memcpy(pattern_cstr, s + 1, *s);
+					pattern_cstr[*s] = '\0';
+
+					int tmp = OptionEscape;
+					OptionEscape = 0;
+					int match_idx = re_match(pattern_cstr, text_cstr, &match_length);
+					OptionEscape = tmp;
+
+					if (match_idx != -1)
+					{
+						// Found a match - update size variable with match length
+						if (size_var_float)
+							*size_var_float = (MMFLOAT)match_length;
+						else
+							*size_var_int = (int64_t)match_length;
+						iret = i + g_OptionBase;
+						return;
+					}
+				}
+				else
+				{
+					// Simple string match
+					if (!(t & T_STR))
+						error("Type mismatch: expected string value");
+
+					// Compare strings (MMBasic string format: first byte is length)
+					if (*val == *s && memcmp(val + 1, s + 1, *s) == 0)
+					{
+						iret = i + g_OptionBase;
+						return;
+					}
+				}
+			}
+		}
+
+		// Not found - set size to 0 for regex mode
+		if (use_regex)
+		{
+			if (size_var_float)
+				*size_var_float = 0.0;
+			else
+				*size_var_int = 0;
+		}
+		iret = -1;
+		return;
+	}
+
+	// Check for OFFSET subfunction: STRUCT(OFFSET typename$, element$)
+	if ((p = checkstring(ep, (unsigned char *)"OFFSET")) != NULL)
+	{
+		unsigned char *typename_str, *element_str;
+		int i, member_type, member_offset, member_size;
+
+		// Parse remaining arguments: typename$, element$
+		getcsargs(&p, 3); // typename$, element$ = 3 tokens
+		if (argc != 3)
+			error("Syntax: STRUCT(OFFSET typename$, element$)");
+
+		// Get the structure type name (argv[0])
+		typename_str = getstring(argv[0]);
+
+		// Get the element/member name (argv[2])
+		element_str = getstring(argv[2]);
+
+		// Search for the structure type by name
+		for (i = 0; i < g_structcnt; i++)
+		{
+			if (g_structtbl[i] != NULL &&
+				strlen((char *)g_structtbl[i]->name) == *typename_str &&
+				strncasecmp((char *)g_structtbl[i]->name, (char *)(typename_str + 1), *typename_str) == 0)
+			{
+				// Found the structure type, now find the member
+				int member_idx = FindStructMember(i, element_str + 1, &member_type, &member_offset, &member_size, NULL);
+				if (member_idx < 0)
+					error("Member not found in structure");
+				targ = T_INT;
+				iret = member_offset;
+				return;
+			}
+		}
+
+		error("Structure type not found");
+	}
+
+	// Check for SIZEOF subfunction: STRUCT(SIZEOF typename$)
+	if ((p = checkstring(ep, (unsigned char *)"SIZEOF")) != NULL)
+	{
+		unsigned char *typename_str;
+		int i;
+
+		// Parse remaining argument: typename$
+		getcsargs(&p, 1); // typename$ = 1 token
+		if (argc != 1)
+			error("Syntax: STRUCT(SIZEOF typename$)");
+
+		// Get the structure type name (argv[0])
+		typename_str = getstring(argv[0]);
+
+		// Search for the structure type by name
+		for (i = 0; i < g_structcnt; i++)
+		{
+			if (g_structtbl[i] != NULL &&
+				strlen((char *)g_structtbl[i]->name) == *typename_str &&
+				strncasecmp((char *)g_structtbl[i]->name, (char *)(typename_str + 1), *typename_str) == 0)
+			{
+				targ = T_INT;
+				iret = g_structtbl[i]->total_size;
+				return;
+			}
+		}
+
+		error("Structure type not found");
+	}
+
+	// Check for TYPE subfunction: STRUCT(TYPE typename$, element$)
+	// Returns T_INT, T_NBR or T_STR for the base type of the element
+	if ((p = checkstring(ep, (unsigned char *)"TYPE")) != NULL)
+	{
+		unsigned char *typename_str, *element_str;
+		int i, member_type, member_offset, member_size;
+
+		// Parse remaining arguments: typename$, element$
+		getcsargs(&p, 3); // typename$, element$ = 3 tokens
+		if (argc != 3)
+			error("Syntax: STRUCT(TYPE typename$, element$)");
+
+		// Get the structure type name (argv[0])
+		typename_str = getstring(argv[0]);
+
+		// Get the element/member name (argv[2])
+		element_str = getstring(argv[2]);
+
+		// Search for the structure type by name
+		for (i = 0; i < g_structcnt; i++)
+		{
+			if (g_structtbl[i] != NULL &&
+				strlen((char *)g_structtbl[i]->name) == *typename_str &&
+				strncasecmp((char *)g_structtbl[i]->name, (char *)(typename_str + 1), *typename_str) == 0)
+			{
+				// Found the structure type, now find the member
+				int member_idx = FindStructMember(i, element_str + 1, &member_type, &member_offset, &member_size, NULL);
+				if (member_idx < 0)
+					error("Member not found in structure");
+				targ = T_INT;
+				// Return only the base type (T_INT, T_NBR or T_STR)
+				iret = member_type & (T_INT | T_NBR | T_STR);
+				return;
+			}
+		}
+
+		error("Structure type not found");
+	}
+
+	error("Unknown STRUCT subfunction");
+}
+#endif // rp2350
 
 /**
  * @cond

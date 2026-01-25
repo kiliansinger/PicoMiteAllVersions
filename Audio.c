@@ -64,7 +64,7 @@ OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
 #include "dr_mp3.h"
 #define MOD_BUFFER_SIZE WAV_BUFFER_SIZE
 #else
-#define MOD_BUFFER_SIZE (WAV_BUFFER_SIZE / 4) * 3
+#define MOD_BUFFER_SIZE (WAV_BUFFER_SIZE / 4)
 #endif
 #include "hardware/pio.h"
 #include "hardware/pio_instructions.h"
@@ -167,6 +167,7 @@ char WAVfilename[FF_MAX_LFN] = {0};
 #ifdef rp2350
 drmp3 *mymp3;
 #endif
+void setrate(int rate);
 void *my_malloc(size_t sz, void *pUserData)
 {
 	return GetMemory(sz);
@@ -600,7 +601,7 @@ const char toneheader[44] = {0x52, 0x49, 0x46, 0x46,
 							 0x64, 0x61, 0x74, 0x61,
 							 0xFF, 0xFF, 0xFF, 0xFF};
 
-void __not_in_flash_func(iconvert)(uint16_t *ibuff, int16_t *sbuff, int count)
+static inline void iconvert(uint16_t *ibuff, int16_t *sbuff, int count)
 {
 	int i;
 	for (i = 0; i < (count); i += 2)
@@ -609,13 +610,13 @@ void __not_in_flash_func(iconvert)(uint16_t *ibuff, int16_t *sbuff, int count)
 		ibuff[i + 1] = (uint16_t)((((int)sbuff[i + 1] * mapping[vol_right] / 2000 + 32768)) >> 4);
 	}
 }
-void MIPS64 __not_in_flash_func(i2sconvert)(int16_t *fbuff, int16_t *sbuff, int count)
+static inline void i2sconvert(int16_t *fbuff, int16_t *sbuff, int count)
 {
 	int i;
 	for (i = 0; i < (count); i += 2)
 	{
-		sbuff[i] = (int16_t)((int)(fbuff[i]) * mapping[vol_left] / 2000);
-		sbuff[i + 1] = (int16_t)((int)(fbuff[i + 1]) * mapping[vol_right] / 2000);
+		sbuff[i] = (int16_t)((int)(fbuff[i]) * mapping[vol_left] / 2048);
+		sbuff[i + 1] = (int16_t)((int)(fbuff[i + 1]) * mapping[vol_right] / 2048);
 	}
 }
 
@@ -708,6 +709,7 @@ void CloseAudio(int all)
 		streamreadpointer = NULL;
 		streambuffer = NULL;
 	}
+	setrate(-1);
 	return;
 }
 void setrate(int rate)
@@ -715,6 +717,11 @@ void setrate(int rate)
 	static int lastrate = 0;
 	if (rate == lastrate)
 		return;
+	if (rate == -1)
+	{
+		lastrate = rate;
+		return;
+	}
 	lastrate = rate;
 	AUDIO_WRAP = (Option.CPU_Speed * 1000) / rate - 1;
 	pwm_set_wrap(AUDIO_SLICE, AUDIO_WRAP);
@@ -791,6 +798,7 @@ void playimmediatevs1053(int play)
 void wavcallback(char *p)
 {
 	int actualrate;
+	audiorepeat = 1;
 	if (strchr((char *)p, '.') == NULL)
 		strcat((char *)p, ".wav");
 	if (CurrentlyPlaying == P_WAV)
@@ -820,7 +828,6 @@ void wavcallback(char *p)
 	//        PInt(mywav.sampleRate);MMPrintString(" Sample rate\r\n");
 	if (Option.AUDIO_L)
 	{
-		audiorepeat = 1;
 		actualrate = mywav->sampleRate;
 		while (actualrate < 32000)
 		{
@@ -858,6 +865,7 @@ void wavcallback(char *p)
 }
 void mp3callback(char *p, int position)
 {
+	audiorepeat = 1;
 	if (strchr((char *)p, '.') == NULL)
 		strcat((char *)p, ".mp3");
 	if (CurrentlyPlaying == P_MP3)
@@ -901,7 +909,6 @@ void mp3callback(char *p, int position)
 	mono = (mymp3->channels == 1 ? 1 : 0);
 	if (Option.AUDIO_L)
 	{
-		audiorepeat = 1;
 		actualrate = mymp3->sampleRate;
 		while (actualrate < PWM_FREQ)
 		{
@@ -947,6 +954,7 @@ void midicallback(char *p)
 void flaccallback(char *p)
 {
 	int actualrate;
+	audiorepeat = 1;
 	if (strchr((char *)p, '.') == NULL)
 		strcat((char *)p, ".flac");
 	if (CurrentlyPlaying == P_FLAC)
@@ -981,7 +989,6 @@ void flaccallback(char *p)
 	mono = (myflac->channels == 1 ? 1 : 0);
 	if (Option.AUDIO_L)
 	{
-		audiorepeat = 1;
 		actualrate = myflac->sampleRate;
 		while (actualrate < PWM_FREQ)
 		{
@@ -1149,7 +1156,7 @@ void MIPS16 cmd_play(void)
 		uint16_t *dd;
 		int64_t *aint;
 		skipspace(tp);
-		int size = parseintegerarray(tp, &aint, 1, 1, NULL, false);
+		int size = parseintegerarray(tp, &aint, 1, 1, NULL, false, NULL);
 		dd = (uint16_t *)aint;
 		if (size != 1024)
 			StandardError(17);
@@ -1400,8 +1407,8 @@ void MIPS16 cmd_play(void)
 		getcsargs(&tp, 11); // this MUST be the first executable line in the function
 		if (!(argc == 11 || argc == 9 || argc == 7 || argc == 5))
 			StandardError(2);
-		arraysize = parseintegerarray(argv[0], (int64_t **)&leftarray, 1, 1, NULL, false);
-		if (parseintegerarray(argv[2], (int64_t **)&rightarray, 2, 1, NULL, false) != arraysize)
+		arraysize = parseintegerarray(argv[0], (int64_t **)&leftarray, 1, 1, NULL, false, NULL);
+		if (parseintegerarray(argv[2], (int64_t **)&rightarray, 2, 1, NULL, false, NULL) != arraysize)
 			StandardError(16);
 		arraysize *= 4;
 		freq = getnumber(argv[4]);
@@ -1955,7 +1962,7 @@ void MIPS16 cmd_play(void)
 			error("VS1053 already open");
 		void *ptr1 = NULL;
 		int64_t *aint;
-		streamsize = parseintegerarray(argv[0], &aint, 1, 1, NULL, true) * 8;
+		streamsize = parseintegerarray(argv[0], &aint, 1, 1, NULL, true, NULL) * 8;
 		streambuffer = (char *)aint;
 		ptr1 = findvar(argv[2], V_FIND | V_EMPTY_OK | V_NOFIND_ERR);
 		if (g_vartbl[g_VarIndex].type & T_INT)

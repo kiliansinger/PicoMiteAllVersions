@@ -77,6 +77,16 @@ void cmd_troff(void);
 void cmd_tron(void);
 void cmd_trace(void);
 void cmd_const(void);
+#ifdef STRUCTENABLED
+struct s_structdef; // Forward declaration
+void cmd_type(void);
+void cmd_endtype(void);
+void cmd_struct(void);
+void fun_struct(void);
+const char *ParseStructMember(unsigned char *p, struct s_structdef *sd); // Returns NULL on success, error message on failure
+int FindStructType(unsigned char *name);
+int FindStructMember(int struct_idx, unsigned char *membername, int *member_type, int *member_offset, int *member_size, short *member_dims);
+#endif
 void cmd_select(void);
 void cmd_case(void);
 void cmd_option(void);
@@ -132,6 +142,7 @@ void cmd_port(void);
 void cmd_adc(void);
 void cmd_ir(void);
 void cmd_lcd(void);
+void cmd_i2clcd(void);
 void cmd_keypad(void);
 void cmd_backlight(void);
 void cmd_device(void);
@@ -220,6 +231,7 @@ void cmd_bezier(void);
 void cmd_star(void);
 void cmd_locate(void);
 void cmd_stepper(void);
+void cmd_bitstream(void);
 
 #ifdef PICOMITEWEB
 void cmd_web(void);
@@ -508,7 +520,7 @@ void fun_linputstr(void);
 	{(unsigned char *)"TEMPR START", T_CMD, 0, cmd_ds18b20},
 	{(unsigned char *)"SPI", T_CMD, 0, cmd_spi},
 	{(unsigned char *)"SPI2", T_CMD, 0, cmd_spi2},
-	{(unsigned char *)"XModem", T_CMD, 0, cmd_xmodem},
+	{(unsigned char *)"Colour Map", T_CMD, 0, cmd_colourmap},
 	{(unsigned char *)"Cat", T_CMD, 0, cmd_inc},
 	{(unsigned char *)"Color", T_CMD, 0, cmd_colour},
 	{(unsigned char *)"Files", T_CMD, 0, cmd_files},
@@ -557,7 +569,6 @@ void fun_linputstr(void);
 	{(unsigned char *)"MODE", T_CMD, 0, cmd_mode},
 	{(unsigned char *)"Map(", T_CMD | T_FUN, 0, cmd_map},
 	{(unsigned char *)"Map", T_CMD, 0, cmd_map},
-	{(unsigned char *)"Colour Map", T_CMD, 0, cmd_colourmap},
 #else
 	{(unsigned char *)"Camera", T_CMD, 0, cmd_camera},
 	{(unsigned char *)"Refresh", T_CMD, 0, cmd_refresh},
@@ -619,6 +630,15 @@ void fun_linputstr(void);
 	{(unsigned char *)"Location", T_CMD, 0, cmd_locate},
 	{(unsigned char *)"Stepper", T_CMD, 0, cmd_stepper},
 #endif
+#ifdef STRUCTENABLED
+	{(unsigned char *)"Type", T_CMD, 0, cmd_type},
+	{(unsigned char *)"End Type", T_CMD, 0, cmd_endtype},
+	{(unsigned char *)"Struct", T_CMD, 0, cmd_struct},
+#endif
+	{(unsigned char *)"XModem", T_CMD, 0, cmd_xmodem},
+	{(unsigned char *)"I2CLCD", T_CMD, 0, cmd_i2clcd},
+	{(unsigned char *)"Bitstream", T_CMD, 0, cmd_bitstream},
+
 {
 	(unsigned char *)"", 0, 0, cmd_null
 } // this dummy entry is always at the end
@@ -771,6 +791,9 @@ void fun_linputstr(void);
 #endif
 	{(unsigned char *)"Trim$(", T_FUN | T_STR, 0, fun_trim},
 	{(unsigned char *)"LInput(", T_FUN | T_INT, 0, fun_linputstr},
+#ifdef STRUCTENABLED
+	{(unsigned char *)"Struct(", T_FUN | T_INT, 0, fun_struct},
+#endif
 {
 	(unsigned char *)"", 0, 0, cmd_null
 } // this dummy entry is always at the end

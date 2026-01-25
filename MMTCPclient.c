@@ -342,7 +342,7 @@ int cmd_tcpclient(void)
             SyntaxError();
         ;
         char *request = (char *)getstring(argv[0]);
-        size = parseintegerarray(argv[2], &dest, 2, 1, NULL, true) * 8;
+        size = parseintegerarray(argv[2], &dest, 2, 1, NULL, true, NULL) * 8;
         dest[0] = 0;
         q = (uint8_t *)&dest[1];
         if (argc == 5)
@@ -381,7 +381,7 @@ int cmd_tcpclient(void)
             SyntaxError();
         ;
         char *request = (char *)getstring(argv[0]);
-        size = parseintegerarray(argv[2], &dest, 2, 1, NULL, true) * 8;
+        size = parseintegerarray(argv[2], &dest, 2, 1, NULL, true, NULL) * 8;
         dest[0] = 0;
         q = (uint8_t *)&dest[1];
         ptr1 = findvar(argv[4], V_FIND | V_NOFIND_ERR);

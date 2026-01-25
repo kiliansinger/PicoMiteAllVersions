@@ -583,7 +583,11 @@ int __not_in_flash_func(GetTouchAxis)(int cmd)
 /**
  * Get a reading from capacitive touch controller
  */
+#if LOWRAM
+int GetTouchAxisCap(int y)
+#else
 int __not_in_flash_func(GetTouchAxisCap)(int y)
+#endif
 {
     uint32_t i, in;
 

@@ -861,7 +861,7 @@ int cmd_tcpserver(void)
                 if (argc != 3)
                         StandardError(2);
                 int pcb = getint(argv[0], 1, MaxPcb) - 1;
-                parseintegerarray(argv[2], &dest, 2, 1, NULL, false);
+                parseintegerarray(argv[2], &dest, 2, 1, NULL, false, NULL);
                 q = (uint8_t *)&dest[1];
                 //                int j=(g_vartbl[g_VarIndex].dims[0] - g_OptionBase);
                 state->buffer_sent[pcb] = q;

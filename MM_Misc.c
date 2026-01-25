@@ -498,7 +498,7 @@ void cmd_sort(void)
     truesize = size;
     if (argc >= 3 && *argv[2])
     {
-        int card = parseintegerarray(argv[2], &a4int, 2, 1, NULL, true) - 1;
+        int card = parseintegerarray(argv[2], &a4int, 2, 1, NULL, true, NULL) - 1;
         if (card != size)
             StandardError(16);
     }
@@ -756,7 +756,7 @@ void cmd_longString(void)
         getcsargs(&tp, 5);
         if (argc != 5)
             StandardError(2);
-        j = (parseintegerarray(argv[0], &dest, 1, 1, NULL, true) - 1) * 8 - 1;
+        j = (parseintegerarray(argv[0], &dest, 1, 1, NULL, true, NULL) - 1) * 8 - 1;
         q = (uint8_t *)&dest[1];
         p = getint(argv[2], g_OptionBase, j - g_OptionBase);
         nbr = getint(argv[4], 0, 255);
@@ -773,7 +773,7 @@ void cmd_longString(void)
         getcsargs(&tp, 3);
         if (argc != 3)
             StandardError(2);
-        j = parseintegerarray(argv[0], &dest, 1, 1, NULL, true) - 1;
+        j = parseintegerarray(argv[0], &dest, 1, 1, NULL, true, NULL) - 1;
         q = (char *)&dest[1];
         q += dest[0];
         p = (char *)getstring(argv[2]);
@@ -795,7 +795,7 @@ void cmd_longString(void)
         getcsargs(&tp, 3);
         if (argc != 3)
             StandardError(2);
-        parseintegerarray(argv[0], &dest, 1, 1, NULL, true);
+        parseintegerarray(argv[0], &dest, 1, 1, NULL, true, NULL);
         q = (char *)&dest[1];
         trim = getint(argv[2], 1, dest[0]);
         i = dest[0] - trim;
@@ -815,7 +815,7 @@ void cmd_longString(void)
         getcsargs(&tp, 5);
         if (argc != 5)
             StandardError(2);
-        parseintegerarray(argv[0], &dest, 1, 1, NULL, true);
+        parseintegerarray(argv[0], &dest, 1, 1, NULL, true, NULL);
         q = (char *)&dest[1];
         p = (char *)getstring(argv[2]);
         nbr = getint(argv[4], 1, dest[0] - *p + 1);
@@ -837,7 +837,7 @@ void cmd_longString(void)
             StandardError(2);
         int64_t nbr = getinteger(argv[2]);
         i = nbr;
-        j = parseintegerarray(argv[0], &dest, 1, 1, NULL, true) - 1;
+        j = parseintegerarray(argv[0], &dest, 1, 1, NULL, true, NULL) - 1;
         q = (char *)&dest[1];
         dest[0] = 0;
         p = (char *)getstring(argv[4]);
@@ -861,9 +861,9 @@ void cmd_longString(void)
         getcsargs(&tp, 5);
         if (argc != 5)
             StandardError(2);
-        j = parseintegerarray(argv[0], &dest, 1, 1, NULL, true) - 1;
+        j = parseintegerarray(argv[0], &dest, 1, 1, NULL, true, NULL) - 1;
         q = (char *)&dest[1];
-        parseintegerarray(argv[2], &src, 2, 1, NULL, false);
+        parseintegerarray(argv[2], &src, 2, 1, NULL, false, NULL);
         p = (char *)&src[1];
         nbr = i = getinteger(argv[4]);
         if (nbr > src[0])
@@ -885,9 +885,9 @@ void cmd_longString(void)
         getcsargs(&tp, 5);
         if (argc != 5)
             StandardError(2);
-        j = parseintegerarray(argv[0], &dest, 1, 1, NULL, true) - 1;
+        j = parseintegerarray(argv[0], &dest, 1, 1, NULL, true, NULL) - 1;
         q = (char *)&dest[1];
-        parseintegerarray(argv[2], &src, 2, 1, NULL, false);
+        parseintegerarray(argv[2], &src, 2, 1, NULL, false, NULL);
         p = (char *)&src[1];
         nbr = i = getinteger(argv[4]);
         if (nbr > src[0])
@@ -913,9 +913,9 @@ void cmd_longString(void)
         getcsargs(&tp, 7);
         if (argc < 5)
             StandardError(2);
-        j = parseintegerarray(argv[0], &dest, 1, 1, NULL, true) - 1;
+        j = parseintegerarray(argv[0], &dest, 1, 1, NULL, true, NULL) - 1;
         q = (char *)&dest[1];
-        parseintegerarray(argv[2], &src, 2, 1, NULL, false);
+        parseintegerarray(argv[2], &src, 2, 1, NULL, false, NULL);
         p = (char *)&src[1];
         start = getint(argv[4], 1, src[0]);
         if (argc == 7)
@@ -942,7 +942,7 @@ void cmd_longString(void)
         getcsargs(&tp, 1);
         if (argc != 1)
             StandardError(2);
-        parseintegerarray(argv[0], &dest, 1, 1, NULL, true);
+        parseintegerarray(argv[0], &dest, 1, 1, NULL, true, NULL);
         dest[0] = 0;
         return;
     }
@@ -954,7 +954,7 @@ void cmd_longString(void)
         getcsargs(&tp, 3);
         if (argc != 3)
             StandardError(2);
-        j = (parseintegerarray(argv[0], &dest, 1, 1, NULL, true) - 1) * 8;
+        j = (parseintegerarray(argv[0], &dest, 1, 1, NULL, true, NULL) - 1) * 8;
         dest[0] = getint(argv[2], 0, j);
         return;
     }
@@ -967,7 +967,7 @@ void cmd_longString(void)
         getcsargs(&tp, 1);
         if (argc != 1)
             StandardError(2);
-        parseintegerarray(argv[0], &dest, 1, 1, NULL, true);
+        parseintegerarray(argv[0], &dest, 1, 1, NULL, true, NULL);
         q = (char *)&dest[1];
         i = dest[0];
         while (i--)
@@ -994,14 +994,14 @@ void cmd_longString(void)
             if (*argv[0] == '#')
                 argv[0]++;              // check if the first arg is a file number
             fnbr = getinteger(argv[0]); // get the number
-            parseintegerarray(argv[2], &dest, 2, 1, NULL, true);
+            parseintegerarray(argv[2], &dest, 2, 1, NULL, true, NULL);
             if (argc == 4)
                 if (*argv[3] == ';')
                     docrlf = false;
         }
         else
         {
-            parseintegerarray(argv[0], &dest, 1, 1, NULL, true);
+            parseintegerarray(argv[0], &dest, 1, 1, NULL, true, NULL);
             if (argc == 2)
                 if (*argv[1] == ';')
                     docrlf = false;
@@ -1025,7 +1025,7 @@ void cmd_longString(void)
         getcsargs(&tp, 1);
         if (argc != 1)
             StandardError(2);
-        parseintegerarray(argv[0], &dest, 1, 1, NULL, true);
+        parseintegerarray(argv[0], &dest, 1, 1, NULL, true, NULL);
         q = (char *)&dest[1];
         i = dest[0];
         while (i--)
@@ -1046,10 +1046,10 @@ void cmd_longString(void)
         getcsargs(&tp, 3);
         if (argc != 3)
             StandardError(2);
-        j = parseintegerarray(argv[0], &dest, 1, 1, NULL, true);
+        j = parseintegerarray(argv[0], &dest, 1, 1, NULL, true, NULL);
         q = (char *)&dest[1];
         dest[0] = 0;
-        parseintegerarray(argv[2], &src, 2, 1, NULL, false);
+        parseintegerarray(argv[2], &src, 2, 1, NULL, false, NULL);
         p = (char *)&src[1];
         if (j * 8 < src[0])
             StandardError(23);
@@ -1069,10 +1069,10 @@ void cmd_longString(void)
         getcsargs(&tp, 3);
         if (argc != 3)
             StandardError(2);
-        j = parseintegerarray(argv[0], &dest, 1, 1, NULL, true) - 1;
+        j = parseintegerarray(argv[0], &dest, 1, 1, NULL, true, NULL) - 1;
         q = (char *)&dest[1];
         d = dest[0];
-        parseintegerarray(argv[2], &src, 2, 1, NULL, false);
+        parseintegerarray(argv[2], &src, 2, 1, NULL, false, NULL);
         p = (char *)&src[1];
         i = s = src[0];
         if (j * 8 < (d + s))
@@ -1199,9 +1199,9 @@ void cmd_longString(void)
             getcsargs(&p, 3);
             if (argc != 3)
                 StandardError(2);
-            j = parseintegerarray(argv[2], &dest, 2, 1, NULL, true) - 1;
+            j = parseintegerarray(argv[2], &dest, 2, 1, NULL, true, NULL) - 1;
             q = (unsigned char *)&dest[1];
-            parseintegerarray(argv[0], &src, 1, 1, NULL, false);
+            parseintegerarray(argv[0], &src, 1, 1, NULL, false, NULL);
             qq = (unsigned char *)&src[1];
             if (j * 8 < b64e_size(src[0]))
                 StandardError(23);
@@ -1217,9 +1217,9 @@ void cmd_longString(void)
             getcsargs(&p, 3);
             if (argc != 3)
                 StandardError(2);
-            j = parseintegerarray(argv[2], &dest, 2, 1, NULL, true) - 1;
+            j = parseintegerarray(argv[2], &dest, 2, 1, NULL, true, NULL) - 1;
             q = (unsigned char *)&dest[1];
-            parseintegerarray(argv[0], &src, 1, 1, NULL, false);
+            parseintegerarray(argv[0], &src, 1, 1, NULL, false, NULL);
             qq = (unsigned char *)&src[1];
             if (j * 8 < b64d_size(src[0]))
                 StandardError(23);
@@ -1241,7 +1241,7 @@ void cmd_lmid(void)
     getcsargs(&cmdline, 5);
     if (!(argc == 5 || argc == 3))
         StandardError(2);
-    int totalsize = (parseintegerarray(argv[0], &dest, 1, 1, NULL, true) - 1) * 8; // size of the longsting in bytes
+    int totalsize = (parseintegerarray(argv[0], &dest, 1, 1, NULL, true, NULL) - 1) * 8; // size of the longsting in bytes
     lsStart = (char *)&dest[1];
     int currentlength = dest[0];
     int start = getint(argv[2], 1, currentlength); // pick a starting point in the string
@@ -1360,11 +1360,11 @@ void parselongAES(uint8_t *p, int ivadd, uint8_t *keyx, uint8_t *ivx, int64_t **
         }
     }
     // now process the longstring used for input
-    parseintegerarray(argv[2], &a2int, 2, 1, NULL, false);
+    parseintegerarray(argv[2], &a2int, 2, 1, NULL, false, NULL);
     if (*a2int % 16)
         error("input must be multiple of 16 elements long");
     *inint = a2int;
-    card3 = parseintegerarray(argv[4], &a3int, 3, 1, NULL, false);
+    card3 = parseintegerarray(argv[4], &a3int, 3, 1, NULL, false, NULL);
     if ((card3 - 1) * 8 < *a2int + ivadd)
         error("Output array too small");
     *outint = a3int;
@@ -1379,7 +1379,7 @@ void fun_LGetStr(void)
     getcsargs(&ep, 5);
     if (argc != 5)
         StandardError(2);
-    j = (parseintegerarray(argv[0], &src, 2, 1, NULL, false) - 1) * 8;
+    j = (parseintegerarray(argv[0], &src, 2, 1, NULL, false, NULL) - 1) * 8;
     start = getint(argv[2], 1, j);
     nbr = getinteger(argv[4]);
     if (nbr < 1 || nbr > MAXSTRLEN)
@@ -1405,7 +1405,7 @@ void fun_linputstr(void)
     getcsargs(&ep, 5);
     if (argc != 5)
         SyntaxError();
-    j = (parseintegerarray(argv[0], &dest, 1, 1, NULL, true) - 1) * 8;
+    j = (parseintegerarray(argv[0], &dest, 1, 1, NULL, true, NULL) - 1) * 8;
     q = (uint8_t *)&dest[1];
     nbr = getint(argv[4], g_OptionBase, j - g_OptionBase);
     if (*argv[2] == '#')
@@ -1433,7 +1433,7 @@ void fun_LGetByte(void)
     getcsargs(&ep, 3);
     if (argc != 3)
         StandardError(2);
-    j = (parseintegerarray(argv[0], &src, 2, 1, NULL, false) - 1) * 8;
+    j = (parseintegerarray(argv[0], &src, 2, 1, NULL, false, NULL) - 1) * 8;
     s = (uint8_t *)&src[1];
     start = getint(argv[2], g_OptionBase, j - g_OptionBase);
     iret = s[start - g_OptionBase];
@@ -1454,7 +1454,7 @@ void fun_LInstr(void)
         start = getinteger(argv[4]) - 1;
     else
         start = 0;
-    j = (parseintegerarray(argv[0], &src, 2, 1, NULL, false) - 1);
+    j = (parseintegerarray(argv[0], &src, 2, 1, NULL, false, NULL) - 1);
     str = (char *)&src[0];
     if (argc < 7)
     {
@@ -1535,10 +1535,10 @@ void fun_LCompare(void)
     getcsargs(&ep, 3);
     if (argc != 3)
         StandardError(2);
-    parseintegerarray(argv[0], &dest, 1, 1, NULL, false);
+    parseintegerarray(argv[0], &dest, 1, 1, NULL, false, NULL);
     q = (char *)&dest[1];
     d = dest[0];
-    parseintegerarray(argv[2], &src, 1, 1, NULL, false);
+    parseintegerarray(argv[2], &src, 1, 1, NULL, false, NULL);
     p = (char *)&src[1];
     s = src[0];
     while (!found)
@@ -1582,7 +1582,7 @@ void fun_LLen(void)
     getcsargs(&ep, 1);
     if (argc != 1)
         StandardError(2);
-    parseintegerarray(argv[0], &dest, 1, 1, NULL, false);
+    parseintegerarray(argv[0], &dest, 1, 1, NULL, false, NULL);
     iret = dest[0];
     targ = T_INT;
 }
@@ -1895,6 +1895,8 @@ void cmd_ireturn(void)
 #endif
     if (SaveOptionErrorSkip > 0)
         OptionErrorSkip = SaveOptionErrorSkip + 1;
+    else if (SaveOptionErrorSkip < 0)
+        OptionErrorSkip = SaveOptionErrorSkip; // Restore ON ERROR IGNORE (-1)
     strcpy(MMErrMsg, SaveErrorMessage);
     MMerrno = Saveerrno;
 }
@@ -2863,10 +2865,15 @@ void MIPS16 printoptions(void)
 #endif
         PO("LCDPANEL");
         MMPrintString((char *)display_details[Option.DISPLAY_TYPE].name);
-        MMputchar(',', 1);
-        MMPrintString((char *)PinDef[Option.VGA_HSYNC].pinname);
-        MMputchar(',', 1);
-        MMPrintString((char *)PinDef[Option.VGA_BLUE].pinname);
+#if PICOMITERP2350
+        if (Option.DISPLAY_TYPE >= VGA222)
+        {
+            MMputchar(',', 1);
+            MMPrintString((char *)PinDef[Option.VGA_HSYNC].pinname);
+            MMputchar(',', 1);
+            MMPrintString((char *)PinDef[Option.VGA_BLUE].pinname);
+        }
+#endif
         PRet();
     }
     if (Option.BackLightLevel != 100)
@@ -3535,7 +3542,7 @@ void MIPS16 configure(unsigned char *p)
 #endif
 #if defined(PICOMITE) || defined(PICOMITEWEB)
 #if defined(rp2350)
-            MMPrintString("Palm Pico");
+            MMPrintString("Palm Pico\r\n");
 #endif
 #ifndef USBKEYBOARD
             MMPrintString("Game*Mite\r\n");
@@ -4025,7 +4032,6 @@ void MIPS16 configure(unsigned char *p)
             Option.TOUCH_IRQ = PINMAP[17];
             Option.SD_CS = PINMAP[22];
             Option.DISPLAY_BL = PINMAP[13];
-            format = testMODBUFF(Option.modbuff, Option.modbuffsize);
             Option.DISPLAY_ORIENTATION = 1;
             Option.TOUCH_SWAPXY = 0;
             Option.TOUCH_XZERO = 3963;
@@ -4219,7 +4225,6 @@ void MIPS16 configure(unsigned char *p)
             Option.SerialConsole = 1;
             Option.CombinedCS = 1;
             Option.SD_CS = 0;
-            format = testMODBUFF(Option.modbuff, Option.modbuffsize);
             Option.AUDIO_SLICE = checkslice(PINMAP[26], PINMAP[27], 0);
             strcpy((char *)Option.platform, "USB Edition V1.0");
             SaveOptions();
@@ -7401,6 +7406,12 @@ void MIPS16 fun_info(void)
     }
 #endif
 #ifndef PICOMITEVGA
+    else if (checkstring(ep, (unsigned char *)"LCD320"))
+    {
+        iret = (SSD16TYPE || Option.DISPLAY_TYPE == IPS_4_16);
+        targ = T_INT;
+        return;
+    }
     else if (checkstring(ep, (unsigned char *)"LCDPANEL"))
     {
         strcpy((char *)sret, display_details[Option.DISPLAY_TYPE].name);
@@ -7408,10 +7419,12 @@ void MIPS16 fun_info(void)
         targ = T_STR;
         return;
     }
-    else if (checkstring(ep, (unsigned char *)"LCD320"))
+#else
+    else if (checkstring(ep, (unsigned char *)"LCDPANEL"))
     {
-        iret = (SSD16TYPE || Option.DISPLAY_TYPE == IPS_4_16);
-        targ = T_INT;
+        strcpy((char *)sret, display_details[DISPLAY_TYPE].name);
+        CtoM(sret);
+        targ = T_STR;
         return;
     }
 #endif
@@ -8291,7 +8304,7 @@ void cmd_poke(void)
             {
                 if (argc > 1)
                     error("UNsupported command");
-                I2C_Send_Command(getinteger(argv[0]));
+                I2C_Send_Command(getinteger(argv[0]), 1);
                 return;
             }
             else
@@ -8706,12 +8719,12 @@ int checkdetailinterrupts(void)
 #ifdef rp2350
             PIO pioinuse = (pio == 0 ? pio0 : (pio == 1 ? pio1 : pio2));
 #else
-            PIO pioinuse = (pio == 0 ? pio1 : pio0);
+            PIO pioinuse = (pio == 0 ? pio0 : pio1);
 #endif
             for (int sm = 0; sm < 4; sm++)
             {
-                int TXlevel = ((pioinuse->flevel) >> (sm * 4)) & 0xf;
-                int RXlevel = ((pioinuse->flevel) >> (sm * 4 + 4)) & 0xf;
+                int TXlevel = pio_sm_get_tx_fifo_level(pioinuse, sm);
+                int RXlevel = pio_sm_get_rx_fifo_level(pioinuse, sm);
                 if (RXlevel && pioRXinterrupts[sm][pio])
                 { // is there a character in the buffer and has an interrupt been set?
                     intaddr = pioRXinterrupts[sm][pio];
@@ -8780,6 +8793,12 @@ int checkdetailinterrupts(void)
     {
         CollisionFound = false;
         intaddr = (char *)COLLISIONInterrupt; // set the next stmt to the interrupt location
+        goto GotAnInterrupt;
+    }
+    if (STCollisionInterrupt != NULL && STCollisionFound)
+    {
+        STCollisionFound = false;
+        intaddr = (char *)STCollisionInterrupt; // set the next stmt to the interrupt location
         goto GotAnInterrupt;
     }
 #ifdef PICOMITEWEB
@@ -8947,7 +8966,7 @@ int checkdetailinterrupts(void)
     // an interrupt was found if we jumped to here
 GotAnInterrupt:
     g_LocalIndex++; // IRETURN will decrement this
-    if (OptionErrorSkip > 0)
+    if (OptionErrorSkip != 0)
         SaveOptionErrorSkip = OptionErrorSkip;
     else
         SaveOptionErrorSkip = 0;

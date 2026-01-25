@@ -457,10 +457,12 @@ void DrawPixel16(int x, int y, int c)
         return;
 #if PICOMITERP2350
     if ((Option.DISPLAY_TYPE >= VIRTUAL && Option.DISPLAY_TYPE < VGA222) && WriteBuf == NULL)
-        WriteBuf = GetMemory(VMaxH * VMaxV / 8);
+        WriteBuf = FRAMEBUFFER;
+    ;
 #else
     if ((Option.DISPLAY_TYPE >= VIRTUAL) && WriteBuf == NULL)
-        WriteBuf = GetMemory(VMaxH * VMaxV / 8);
+        WriteBuf = FRAMEBUFFER;
+    ;
 #endif
     unsigned char colour = RGB121(c);
     uint8_t *p = (uint8_t *)(((uint32_t)WriteBuf) + (y * (HRes >> 1)) + (x >> 1));
@@ -483,10 +485,12 @@ void MIPS32 DrawRectangle16(int x1, int y1, int x2, int y2, int c)
 
 #if PICOMITERP2350
     if ((Option.DISPLAY_TYPE >= VIRTUAL && Option.DISPLAY_TYPE < VGA222) && WriteBuf == NULL)
-        WriteBuf = GetMemory(VMaxH * VMaxV / 8);
+        WriteBuf = FRAMEBUFFER;
+    ;
 #else
     if ((Option.DISPLAY_TYPE >= VIRTUAL) && WriteBuf == NULL)
-        WriteBuf = GetMemory(VMaxH * VMaxV / 8);
+        WriteBuf = FRAMEBUFFER;
+    ;
 #endif
 
     // Clamp coordinates (branchless where beneficial)
@@ -554,10 +558,12 @@ void DrawBitmap16(int x1, int y1, int width, int height, int scale, int fc, int 
     unsigned char bcolour = RGB121(bc);
 #if PICOMITERP2350
     if ((Option.DISPLAY_TYPE >= VIRTUAL && Option.DISPLAY_TYPE < VGA222) && WriteBuf == NULL)
-        WriteBuf = GetMemory(VMaxH * VMaxV / 8);
+        WriteBuf = FRAMEBUFFER;
+    ;
 #else
     if ((Option.DISPLAY_TYPE >= VIRTUAL) && WriteBuf == NULL)
-        WriteBuf = GetMemory(VMaxH * VMaxV / 8);
+        WriteBuf = FRAMEBUFFER;
+    ;
 #endif
     for (i = 0; i < height; i++)
     { // step thru the font scan line by line
@@ -646,10 +652,12 @@ void DrawBuffer16(int x1, int y1, int x2, int y2, unsigned char *p)
     uint8_t *pp;
 #if PICOMITERP2350
     if ((Option.DISPLAY_TYPE >= VIRTUAL && Option.DISPLAY_TYPE < VGA222) && WriteBuf == NULL)
-        WriteBuf = GetMemory(VMaxH * VMaxV / 8);
+        WriteBuf = FRAMEBUFFER;
+    ;
 #else
     if ((Option.DISPLAY_TYPE >= VIRTUAL) && WriteBuf == NULL)
-        WriteBuf = GetMemory(VMaxH * VMaxV / 8);
+        WriteBuf = FRAMEBUFFER;
+    ;
 #endif
     // make sure the coordinates are kept within the display area
     if (x2 <= x1)
@@ -722,10 +730,12 @@ void DrawBuffer16Fast(int x1, int y1, int x2, int y2, int blank, unsigned char *
     }
 #if PICOMITERP2350
     if ((Option.DISPLAY_TYPE >= VIRTUAL && Option.DISPLAY_TYPE < VGA222) && WriteBuf == NULL)
-        WriteBuf = GetMemory(VMaxH * VMaxV / 8);
+        WriteBuf = FRAMEBUFFER;
+    ;
 #else
     if ((Option.DISPLAY_TYPE >= VIRTUAL) && WriteBuf == NULL)
-        WriteBuf = GetMemory(VMaxH * VMaxV / 8);
+        WriteBuf = FRAMEBUFFER;
+    ;
 #endif
     for (y = y1; y <= y2; y++)
     {
@@ -781,10 +791,12 @@ void ReadBuffer16(int x1, int y1, int x2, int y2, unsigned char *c)
     uint8_t *pp;
 #if PICOMITERP2350
     if ((Option.DISPLAY_TYPE >= VIRTUAL && Option.DISPLAY_TYPE < VGA222) && WriteBuf == NULL)
-        WriteBuf = GetMemory(VMaxH * VMaxV / 8);
+        WriteBuf = FRAMEBUFFER;
+    ;
 #else
     if ((Option.DISPLAY_TYPE >= VIRTUAL) && WriteBuf == NULL)
-        WriteBuf = GetMemory(VMaxH * VMaxV / 8);
+        WriteBuf = FRAMEBUFFER;
+    ;
 #endif
     if (x2 <= x1)
     {
@@ -868,10 +880,12 @@ void ReadBuffer16Fast(int x1, int y1, int x2, int y2, unsigned char *c)
     }
 #if PICOMITERP2350
     if ((Option.DISPLAY_TYPE >= VIRTUAL && Option.DISPLAY_TYPE < VGA222) && WriteBuf == NULL)
-        WriteBuf = GetMemory(VMaxH * VMaxV / 8);
+        WriteBuf = FRAMEBUFFER;
+    ;
 #else
     if ((Option.DISPLAY_TYPE >= VIRTUAL) && WriteBuf == NULL)
-        WriteBuf = GetMemory(VMaxH * VMaxV / 8);
+        WriteBuf = FRAMEBUFFER;
+    ;
 #endif
     for (y = y1; y <= y2; y++)
     {

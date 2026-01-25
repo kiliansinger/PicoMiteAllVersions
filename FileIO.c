@@ -389,9 +389,18 @@ int __not_in_flash_func(fs_flash_prog)(const struct lfs_config *cfg, lfs_block_t
     assert(block < cfg->block_count);
 
     uint32_t addr = RoundUpK4(TOP_OF_SYSTEM_FLASH) + (Option.modbuff ? 1024 * Option.modbuffsize : 0) + block * 4096 + off;
+#if PICOMITERP2350
+    bool lockfb = (Option.DISPLAY_TYPE >= NEXTGEN);
+    if (lockfb)
+        mutex_enter_blocking(&frameBufferMutex);
+#endif
     disable_interrupts_pico();
     flash_range_program(addr, buffer, size);
     enable_interrupts_pico();
+#if PICOMITERP2350
+    if (lockfb)
+        mutex_exit(&frameBufferMutex);
+#endif
     return 0;
 }
 int __not_in_flash_func(fs_flash_erase)(const struct lfs_config *cfg, lfs_block_t block)
@@ -399,9 +408,18 @@ int __not_in_flash_func(fs_flash_erase)(const struct lfs_config *cfg, lfs_block_
     assert(block < cfg->block_count);
 
     uint32_t block_addr = RoundUpK4(TOP_OF_SYSTEM_FLASH) + (Option.modbuff ? 1024 * Option.modbuffsize : 0) + block * 4096;
+#if PICOMITERP2350
+    bool lockfb = (Option.DISPLAY_TYPE >= NEXTGEN);
+    if (lockfb)
+        mutex_enter_blocking(&frameBufferMutex);
+#endif
     disable_interrupts_pico();
     flash_range_erase(block_addr, BLOCK_SIZE);
     enable_interrupts_pico();
+#if PICOMITERP2350
+    if (lockfb)
+        mutex_exit(&frameBufferMutex);
+#endif
     return 0;
 }
 int __not_in_flash_func(fs_flash_sync)(const struct lfs_config *c)
@@ -686,6 +704,9 @@ void MIPS16 cmd_psram(void)
         if (CurrentLinePtr)
             StandardError(10);
         int j = (Option.PROG_FLASH_SIZE >> 2), i = getint(p, 1, MAXRAMSLOTS);
+        uint8_t *q = (uint8_t *)(PSRAMblock + ((i - 1) * MAX_PROG_SIZE));
+        if (!(*q == T_NEWLINE))
+            error("RAM slot empty");
         disable_interrupts_pico();
         flash_range_erase(PROGSTART, MAX_PROG_SIZE);
         enable_interrupts_pico();
@@ -698,7 +719,6 @@ void MIPS16 cmd_psram(void)
                 error("Erase error");
             }
         disable_interrupts_pico();
-        uint8_t *q = (uint8_t *)(PSRAMblock + ((i - 1) * MAX_PROG_SIZE));
         uint8_t *writebuff = GetTempMemory(4096);
         if (*q == 0xFF)
         {
@@ -729,8 +749,14 @@ void MIPS16 cmd_psram(void)
             ProgMemory = (unsigned char *)(PSRAMblock + ((i - 1) * MAX_PROG_SIZE));
         else
             ProgMemory = (unsigned char *)(flash_target_contents + MAXFLASHSLOTS * MAX_PROG_SIZE);
+        if (!(*ProgMemory == T_NEWLINE))
+            error("RAM slot empty");
         FlashLoad = i;
-        PrepareProgram(true);
+        if (PrepareProgram(true))
+        {
+            PrintPreprogramError();
+            return;
+        }
         nextstmt = (unsigned char *)ProgMemory;
     }
     else if ((p = checkstring(cmdline, (unsigned char *)"RUN")))
@@ -740,9 +766,15 @@ void MIPS16 cmd_psram(void)
             ProgMemory = (unsigned char *)(uint8_t *)PSRAMblock + ((i - 1) * MAX_PROG_SIZE);
         else
             ProgMemory = (unsigned char *)(flash_target_contents + MAXFLASHSLOTS * MAX_PROG_SIZE);
+        if (!(*ProgMemory == T_NEWLINE))
+            error("RAM slot empty");
         ClearRuntime(true);
         FlashLoad = i;
-        PrepareProgram(true);
+        if (PrepareProgram(true))
+        {
+            PrintPreprogramError();
+            return;
+        }
         // Create a global constant MM.CMDLINE$ containing the empty string.
         //        (void) findvar((unsigned char *)"MM.CMDLINE$", V_FIND | V_DIM_VAR | T_CONST);
         if (Option.LIBRARY_FLASH_SIZE == MAX_PROG_SIZE)
@@ -1184,6 +1216,9 @@ void MIPS16 cmd_flash(void)
         if (CurrentLinePtr)
             StandardError(10);
         int j = (Option.PROG_FLASH_SIZE >> 2), i = getint(p, 1, MAXFLASHSLOTS);
+        uint8_t *q = (uint8_t *)(flash_target_contents + (i - 1) * MAX_PROG_SIZE);
+        if (!(*q == T_NEWLINE))
+            error("Flash slot empty");
         if (Option.LIBRARY_FLASH_SIZE == MAX_PROG_SIZE && i == MAXFLASHSLOTS)
             StandardErrorParam(25, MAXFLASHSLOTS);
         disable_interrupts_pico();
@@ -1198,7 +1233,6 @@ void MIPS16 cmd_flash(void)
                 error("Erase error");
             }
         disable_interrupts_pico();
-        uint8_t *q = (uint8_t *)(flash_target_contents + (i - 1) * MAX_PROG_SIZE);
         uint8_t *writebuff = GetTempMemory(4096);
         if (*q == 0xFF)
         {
@@ -1231,8 +1265,14 @@ void MIPS16 cmd_flash(void)
             ProgMemory = (unsigned char *)(flash_target_contents + (i - 1) * MAX_PROG_SIZE);
         else
             ProgMemory = (unsigned char *)(flash_target_contents + MAXFLASHSLOTS * MAX_PROG_SIZE);
+        if (!(*ProgMemory == T_NEWLINE))
+            error("Flash slot empty");
         FlashLoad = i;
-        PrepareProgram(true);
+        if (PrepareProgram(true))
+        {
+            PrintPreprogramError();
+            return;
+        }
         nextstmt = (unsigned char *)ProgMemory;
     }
     else if ((p = checkstring(cmdline, (unsigned char *)"RUN")))
@@ -1244,9 +1284,15 @@ void MIPS16 cmd_flash(void)
             ProgMemory = (unsigned char *)(flash_target_contents + (i - 1) * MAX_PROG_SIZE);
         else
             ProgMemory = (unsigned char *)(flash_target_contents + MAXFLASHSLOTS * MAX_PROG_SIZE);
+        if (!(*ProgMemory == T_NEWLINE))
+            error("Flash slot empty");
         ClearRuntime(true);
         FlashLoad = i;
-        PrepareProgram(true);
+        if (PrepareProgram(true))
+        {
+            PrintPreprogramError();
+            return;
+        }
         // Create a global constant MM.CMDLINE$ containing the empty string.
         //        (void) findvar((unsigned char *)"MM.CMDLINE$", V_FIND | V_DIM_VAR | T_CONST);
         if (Option.LIBRARY_FLASH_SIZE == MAX_PROG_SIZE)
@@ -3259,8 +3305,6 @@ int FileLoadProgram(unsigned char *fname, bool chain)
     //    ClearProgram(true); // clear any leftovers from the previous program
     initFonts();
     m_alloc(chain ? M_LIMITED : M_PROG); // init the variables for program memory
-    if (Option.DISPLAY_TYPE >= VIRTUAL && WriteBuf)
-        FreeMemorySafe((void **)&WriteBuf);
     ClearRuntime(chain ? false : true);
     //    ProgMemory[0] = ProgMemory[1] = ProgMemory[3] = ProgMemory[4] = 0;
     PSize = 0;
@@ -3733,8 +3777,6 @@ int MemLoadProgram(unsigned char *fname, unsigned char *ram)
         return false;
     initFonts();
     m_alloc(M_LIMITED); // init the variables for program memory
-    if (Option.DISPLAY_TYPE >= VIRTUAL && WriteBuf)
-        FreeMemorySafe((void **)&WriteBuf);
     ClearRuntime(false);
     PSize = 0;
     StartEditPoint = NULL;
@@ -3800,7 +3842,11 @@ void MIPS16 loadCMM2(unsigned char *p, bool autorun, bool message)
             return; // no program to run
         ClearRuntime(true);
         WatchdogSet = false;
-        PrepareProgram(true);
+        if (PrepareProgram(true))
+        {
+            PrintPreprogramError();
+            return;
+        }
         IgnorePIN = false;
         if (Option.LIBRARY_FLASH_SIZE == MAX_PROG_SIZE)
             ExecuteProgram(ProgMemory - Option.LIBRARY_FLASH_SIZE); // run anything that might be in the library
@@ -4014,7 +4060,13 @@ void MIPS16 cmd_load(void)
             return; // no program to run
         ClearRuntime(true);
         WatchdogSet = false;
-        PrepareProgram(true);
+        if (PrepareProgram(true))
+        {
+            PrintPreprogramError();
+            SetFont(oldfont);
+            PromptFont = oldfont;
+            return;
+        }
         IgnorePIN = false;
         if (Option.LIBRARY_FLASH_SIZE == MAX_PROG_SIZE)
             ExecuteProgram(ProgMemory - Option.LIBRARY_FLASH_SIZE); // run anything that might be in the library
@@ -4252,6 +4304,7 @@ void MIPS16 CloseAllFiles(void)
 {
     int i;
     closeallsprites();
+    closeallstobjects();
 #ifndef PICOMITEWEB
     closeall3d();
 #endif
@@ -4648,6 +4701,16 @@ void MIPS16 cmd_copy(void)
         ;
         fromfile = getFstring(argv[0]);
         tofile = getFstring(argv[2]);
+        // Check for same file
+        char frompath[FF_MAX_LFN] = {0};
+        char topath[FF_MAX_LFN] = {0};
+        int saveFS = FatFSFileSystem;
+        FatFSFileSystem = 0;
+        getfullfilename((char *)fromfile, frompath);
+        getfullfilename((char *)tofile, topath);
+        FatFSFileSystem = saveFS;
+        if (strcicmp(frompath, topath) == 0)
+            error("Source and destination are the same");
         A2A(fromfile, tofile);
         return;
     }
@@ -4660,6 +4723,16 @@ void MIPS16 cmd_copy(void)
         ;
         fromfile = getFstring(argv[0]);
         tofile = getFstring(argv[2]);
+        // Check for same file
+        char frompath[FF_MAX_LFN] = {0};
+        char topath[FF_MAX_LFN] = {0};
+        int saveFS = FatFSFileSystem;
+        FatFSFileSystem = 1;
+        getfullfilename((char *)fromfile, frompath);
+        getfullfilename((char *)tofile, topath);
+        FatFSFileSystem = saveFS;
+        if (strcicmp(frompath, topath) == 0)
+            error("Source and destination are the same");
         B2B(fromfile, tofile);
         return;
     }
@@ -4734,7 +4807,7 @@ void MIPS16 cmd_copy(void)
         }
         //        MMPrintString(fromdir);putConsole(':',0);MMPrintString(todir);PRet();
         //        PInt(fromfilesystem);PIntComma(tofilesystem);PRet();
-        if (fromfilesystem == tofilesystem && strcmp(fromdir, todir) == 0)
+        if (fromfilesystem == tofilesystem && strcicmp(fromdir, todir) == 0)
         {
             FatFSFileSystem = localsave;
             error("Source and destination are the same");
@@ -4828,22 +4901,83 @@ void MIPS16 cmd_copy(void)
         return;
     }
 
-    if (drivecheck((char *)fromfile, &waste) == FLASHFILE && drivecheck((char *)tofile, &waste) == FLASHFILE)
+    // Single file copy - check if destination is a directory
+    int tolen = strlen((char *)tofile);
+    if (tolen > 0 && tofile[tolen - 1] == '/')
+    {
+        // Destination is a directory - extract filename from source and append
+        int localsave = FatFSFileSystem;
+        char todir[FF_MAX_LFN] = {0};
+        if (!(ExistsDir((char *)tofile, todir, &tofilesystem)))
+        {
+            FatFSFileSystem = localsave;
+            error("$ not a directory", tofile);
+        }
+        // Extract filename from source
+        char *srcname = strrchr((char *)fromfile, '/');
+        if (srcname)
+            srcname++; // skip the '/'
+        else
+            srcname = (char *)fromfile; // no path, just filename
+        // Skip drive letter if present
+        if (strlen(srcname) >= 2 && srcname[1] == ':')
+            srcname += 2;
+        if (*srcname == '/')
+            srcname++;
+        // Check we have a valid filename
+        if (*srcname == 0)
+            error("No filename specified");
+        // Build full destination path with drive prefix
+        unsigned char *newtofile = GetTempStrMemory();
+        strcpy((char *)newtofile, tofilesystem == 0 ? "A:" : "B:");
+        strcat((char *)newtofile, todir);
+        if (newtofile[strlen((char *)newtofile) - 1] != '/')
+            strcat((char *)newtofile, "/");
+        strcat((char *)newtofile, srcname);
+        tofile = newtofile;
+        FatFSFileSystem = localsave;
+    }
+
+    // Resolve full paths for source and destination to check for same file
+    char fromfullpath[FF_MAX_LFN] = {0};
+    char tofullpath[FF_MAX_LFN] = {0};
+    int localsave = FatFSFileSystem;
+    int fromfs, tofs;
+
+    // Get source filesystem and full path
+    fromfs = drivecheck((char *)fromfile, &waste);
+    FatFSFileSystem = fromfs - 1;
+    getfullfilename((char *)fromfile, fromfullpath);
+
+    // Get destination filesystem and full path
+    tofs = drivecheck((char *)tofile, &waste);
+    FatFSFileSystem = tofs - 1;
+    getfullfilename((char *)tofile, tofullpath);
+
+    FatFSFileSystem = localsave;
+
+    // Check if source and destination are the same file
+    if (fromfs == tofs && strcicmp(fromfullpath, tofullpath) == 0)
+    {
+        error("Source and destination are the same");
+    }
+
+    if (fromfs == FLASHFILE && tofs == FLASHFILE)
     {
         A2A(fromfile, tofile);
         return;
     }
-    if (drivecheck((char *)fromfile, &waste) == FATFSFILE && drivecheck((char *)tofile, &waste) == FATFSFILE)
+    if (fromfs == FATFSFILE && tofs == FATFSFILE)
     {
         B2B(fromfile, tofile);
         return;
     }
-    if (drivecheck((char *)fromfile, &waste) == FLASHFILE && drivecheck((char *)tofile, &waste) == FATFSFILE)
+    if (fromfs == FLASHFILE && tofs == FATFSFILE)
     {
         A2B(fromfile, tofile);
         return;
     }
-    if (drivecheck((char *)fromfile, &waste) == FATFSFILE && drivecheck((char *)tofile, &waste) == FLASHFILE)
+    if (fromfs == FATFSFILE && tofs == FLASHFILE)
     {
         B2A(fromfile, tofile);
         return;
@@ -5615,6 +5749,17 @@ void cmd_autosave(void)
         CloseAudio(1);
         CloseAllFiles();
         ClearExternalIO(); // this MUST come before InitHeap(true)
+#ifdef STRUCTENABLED
+        // Clear structure type definitions to free heap memory
+        for (int i = 0; i < MAX_STRUCT_TYPES; i++)
+        {
+            if (g_structtbl[i] != NULL)
+            {
+                FreeMemorySafe((void **)&g_structtbl[i]);
+            }
+        }
+        g_structcnt = 0;
+#endif
 #ifdef PICOMITEWEB
         if (TCPstate)
         {
