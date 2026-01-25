@@ -7392,6 +7392,7 @@ void fun_sprite(void)
                         int bytepos = px >> 1;
                         int is_transparent;
                         int boundsleft2,boundsright2,boundstop2,boundsbottom2;
+                        int px2,py2;
                         if (px & 1)
                         {
                             // Odd x - upper nibble
@@ -7419,10 +7420,12 @@ void fun_sprite(void)
 
                         if (iret == 0)
                             iret = 1;
-                        boundsleft2=(sp->rotation & 1)?sw-1-boundsright[py]:boundsleft[py];
-                        boundsright2=(sp->rotation & 1)?sw-1-boundsleft[py]:boundsright[py];
-                        boundstop2=(sp->rotation &2)?sh-1-boundsbottom[px]:boundstop[px];
-                        boundsbottom2=(sp->rotation &2)?sh-1-boundstop[px]:boundsbottom[px];
+                        px2=(sp->rotation & 1)?sw-1-px:px;
+                        py2=(sp->rotation & 2)?sh-1-py:py;
+                        boundsleft2=(sp->rotation & 1)?sw-1-boundsright[py2]:boundsleft[py2];
+                        boundsright2=(sp->rotation & 1)?sw-1-boundsleft[py2]:boundsright[py2];
+                        boundstop2=(sp->rotation &2)?sh-1-boundsbottom[px2]:boundstop[px2];
+                        boundsbottom2=(sp->rotation &2)?sh-1-boundstop[px2]:boundsbottom[px2];
                         // Check if this background pixel overlaps with sprite's non-transparent area
                         if (px >= boundsleft2 && px <= boundsright2)
                         {
