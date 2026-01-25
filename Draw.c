@@ -7377,31 +7377,11 @@ void fun_sprite(void)
                     error((char *)"Buffers are empty");
 
                 // Cache bounds arrays
-                short *boundsleft;// = sp->boundsleft;
-                short *boundsright;// = sp->boundsright;
-                short *boundstop;// = sp->boundstop;
-                short *boundsbottom;// = sp->boundsbottom;
-                //flip bounds depending on the rotation
-                if(sp->rotation==0){//no flipping
-                    boundsleft = sp->boundsleft;
-                    boundsright = sp->boundsright;
-                    boundstop = sp->boundstop;
-                    boundsbottom = sp->boundsbottom;
-                }else{
-                    if(sp->rotation & 1){//x coordinates are flipped
-                        boundsleft = sw-1-sp->boundsright;
-                        boundsright = sw-1-sp->boundsleft;
-                        boundstop = sp->boundstop;
-                        boundsbottom = sp->boundsbottom;
-                    }
-                    if(sp->rotation & 2){//y coordinates are flipped
-                        boundsleft = sp->boundsleft;
-                        boundsright = sp->boundsright;
-                        boundstop = sh-1-sp->boundsbottom;
-                        boundsbottom = sh-1-sp->boundstop;
-                    }
-                }
-
+                short *boundsleft = sp->boundsleft;
+                short *boundsright = sp->boundsright;
+                short *boundstop = sp->boundstop;
+                short *boundsbottom = sp->boundsbottom;
+         
                 // Scan all pixels in the background store
                 for (int py = 0; py < sh; ++py)
                 {
@@ -7412,6 +7392,7 @@ void fun_sprite(void)
                         // Check if background pixel at (px, py) is non-transparent
                         int bytepos = px >> 1;
                         int is_transparent;
+                        int boundsleft2,boundsright2,boundstop2,boundsbottom2;
                         if (px & 1)
                         {
                             // Odd x - upper nibble
@@ -7439,12 +7420,15 @@ void fun_sprite(void)
 
                         if (iret == 0)
                             iret = 1;
-
+                        boundsleft2=(sp->rotation & 1)?sw-1-boundsright[py]:boundsleft[py];
+                        boundsright2=(sp->rotation & 1)?sw-1-boundsleft[py]:boundsright[py];
+                        boundstop2=(sp->rotation &3)?sh-1-boundsbottom[px]:boundstop[px];
+                        boundsbottom2=(sp->rotation &3)?sh-1-boundstop[px]:boundsbottom[px];
                         // Check if this background pixel overlaps with sprite's non-transparent area
-                        if (px >= boundsleft[py] && px <= boundsright[py])
+                        if (px >= boundsleft2 && px <= boundsright2)
                         {
-                            int leftOffset = px - boundsleft[py];
-                            int rightOffset = boundsright[py] - px;
+                            int leftOffset = px - boundsleft2;
+                            int rightOffset = boundsright2 - px;
                             if (leftOffset > bgc[4])
                             {
                                 bgc[4] = leftOffset;
@@ -7456,10 +7440,10 @@ void fun_sprite(void)
                                 iret = 2;
                             }
                         }
-                        if (py >= boundstop[px] && py <= boundsbottom[px])
+                        if (py >= boundstop2 && py <= boundsbottom2)
                         {
-                            int topOffset = py - boundstop[px];
-                            int bottomOffset = boundsbottom[px] - py;
+                            int topOffset = py - boundstop2;
+                            int bottomOffset = boundsbottom2 - py;
                             if (topOffset > bgc[6])
                             {
                                 bgc[6] = topOffset;
