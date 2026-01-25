@@ -265,12 +265,7 @@ struct spritebuffer
     char rotation;                      // Rotation state
     char active;                        // Active flag
     char edges;                         // Edge collision flags
-<<<<<<< HEAD
-    short backgroundcollision[8];       // Background collision (rect:l,r,t,b,boundary:l2,r2,t2,b2) 
-};
-=======
 }; // Total: 80 bytes - 3 sprites fit in one 256-byte memory page
->>>>>>> bc02bd64709a35b1952a09408df975349e31c001
 /* ============================================================================
  * Type definitions - Static object for collision detection
  * ============================================================================ */
