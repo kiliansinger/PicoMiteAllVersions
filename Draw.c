@@ -1,6 +1,5 @@
 /***********************************************************************************************************************
 PicoMite MMBasic
-
 Draw.c
 
 <COPYRIGHT HOLDERS>  Geoff Graham, Peter Mather
@@ -7422,8 +7421,8 @@ void fun_sprite(void)
                             iret = 1;
                         boundsleft2=(sp->rotation & 1)?sw-1-boundsright[py]:boundsleft[py];
                         boundsright2=(sp->rotation & 1)?sw-1-boundsleft[py]:boundsright[py];
-                        boundstop2=(sp->rotation &3)?sh-1-boundsbottom[px]:boundstop[px];
-                        boundsbottom2=(sp->rotation &3)?sh-1-boundstop[px]:boundsbottom[px];
+                        boundstop2=(sp->rotation &2)?sh-1-boundsbottom[px]:boundstop[px];
+                        boundsbottom2=(sp->rotation &2)?sh-1-boundstop[px]:boundsbottom[px];
                         // Check if this background pixel overlaps with sprite's non-transparent area
                         if (px >= boundsleft2 && px <= boundsright2)
                         {
